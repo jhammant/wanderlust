@@ -1,0 +1,74 @@
+[
+  {
+    "id": 0, "place_name": "Val Thorens, France", "city": "Val Thorens", "country": "France",
+    "center": [45.2983, 6.5800], "start_date": "2026-02-14T10:00:00", "end_date": "2026-02-21T16:00:00",
+    "duration_days": 8, "photo_count": 342, "favorite_count": 28, "people": ["Anne", "Clara", "Ethan", "Zoë"],
+    "is_family_trip": true, "season": "winter"
+  },
+  {
+    "id": 1, "place_name": "Barcelona, Spain", "city": "Barcelona", "country": "Spain",
+    "center": [41.3851, 2.1734], "start_date": "2025-08-10T09:00:00", "end_date": "2025-08-17T18:00:00",
+    "duration_days": 8, "photo_count": 523, "favorite_count": 45, "people": ["Anne", "Clara", "Ethan", "Zoë"],
+    "is_family_trip": true, "season": "summer"
+  },
+  {
+    "id": 2, "place_name": "Lisbon, Portugal", "city": "Lisbon", "country": "Portugal",
+    "center": [38.7223, -9.1393], "start_date": "2025-05-22T08:00:00", "end_date": "2025-05-26T20:00:00",
+    "duration_days": 5, "photo_count": 198, "favorite_count": 15, "people": ["Anne"],
+    "is_family_trip": false, "season": "spring"
+  },
+  {
+    "id": 3, "place_name": "Lake Garda, Italy", "city": "Riva del Garda", "country": "Italy",
+    "center": [45.8858, 10.8428], "start_date": "2024-07-20T10:00:00", "end_date": "2024-07-28T14:00:00",
+    "duration_days": 9, "photo_count": 412, "favorite_count": 38, "people": ["Anne", "Clara", "Ethan", "Zoë"],
+    "is_family_trip": true, "season": "summer"
+  },
+  {
+    "id": 4, "place_name": "Cornwall, United Kingdom", "city": "St Ives", "country": "United Kingdom",
+    "center": [50.2140, -5.4803], "start_date": "2024-04-05T09:00:00", "end_date": "2024-04-12T17:00:00",
+    "duration_days": 8, "photo_count": 267, "favorite_count": 20, "people": ["Anne", "Clara", "Ethan", "Zoë"],
+    "is_family_trip": true, "season": "spring"
+  },
+  {
+    "id": 5, "place_name": "Amsterdam, Netherlands", "city": "Amsterdam", "country": "Netherlands",
+    "center": [52.3676, 4.9041], "start_date": "2024-03-15T07:00:00", "end_date": "2024-03-17T20:00:00",
+    "duration_days": 3, "photo_count": 89, "favorite_count": 8, "people": ["Craig"],
+    "is_family_trip": false, "season": "spring"
+  },
+  {
+    "id": 6, "place_name": "Chamonix, France", "city": "Chamonix", "country": "France",
+    "center": [45.9237, 6.8694], "start_date": "2024-02-10T10:00:00", "end_date": "2024-02-17T15:00:00",
+    "duration_days": 8, "photo_count": 289, "favorite_count": 22, "people": ["Anne", "Clara", "Ethan", "Zoë"],
+    "is_family_trip": true, "season": "winter"
+  },
+  {
+    "id": 7, "place_name": "Dubrovnik, Croatia", "city": "Dubrovnik", "country": "Croatia",
+    "center": [42.6507, 18.0944], "start_date": "2023-09-02T08:00:00", "end_date": "2023-09-09T18:00:00",
+    "duration_days": 8, "photo_count": 378, "favorite_count": 31, "people": ["Anne", "Clara", "Ethan"],
+    "is_family_trip": true, "season": "autumn"
+  },
+  {
+    "id": 8, "place_name": "Copenhagen, Denmark", "city": "Copenhagen", "country": "Denmark",
+    "center": [55.6761, 12.5683], "start_date": "2023-06-15T09:00:00", "end_date": "2023-06-19T17:00:00",
+    "duration_days": 5, "photo_count": 156, "favorite_count": 12, "people": ["Anne", "Clara", "Ethan"],
+    "is_family_trip": true, "season": "summer"
+  },
+  {
+    "id": 9, "place_name": "New York, United States", "city": "New York", "country": "United States",
+    "center": [40.7128, -74.0060], "start_date": "2023-03-10T06:00:00", "end_date": "2023-03-16T22:00:00",
+    "duration_days": 7, "photo_count": 445, "favorite_count": 52, "people": ["Anne"],
+    "is_family_trip": false, "season": "spring"
+  },
+  {
+    "id": 10, "place_name": "Mallorca, Spain", "city": "Pollença", "country": "Spain",
+    "center": [39.7650, 3.0151], "start_date": "2022-08-05T10:00:00", "end_date": "2022-08-15T18:00:00",
+    "duration_days": 11, "photo_count": 567, "favorite_count": 48, "people": ["Anne", "Clara", "Ethan"],
+    "is_family_trip": true, "season": "summer"
+  },
+  {
+    "id": 11, "place_name": "Edinburgh, United Kingdom", "city": "Edinburgh", "country": "United Kingdom",
+    "center": [55.9533, -3.1883], "start_date": "2022-12-27T09:00:00", "end_date": "2023-01-02T17:00:00",
+    "duration_days": 7, "photo_count": 201, "favorite_count": 18, "people": ["Anne", "Clara", "Ethan"],
+    "is_family_trip": true, "season": "winter"
+  }
+]

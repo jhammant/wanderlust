@@ -270,5 +270,16 @@ def _load_trips(path):
     return trips
 
 
+@main.command()
+@click.option("--host", default="127.0.0.1", help="Host to bind to")
+@click.option("--port", default=5555, help="Port to run on")
+@click.option("--trips-file", default=None, help="Load trips from JSON file")
+@click.option("--debug", is_flag=True, help="Enable debug mode")
+def web(host, port, trips_file, debug):
+    """Launch the interactive web UI."""
+    from .web import run_web
+    run_web(host=host, port=port, trips_file=trips_file, debug=debug)
+
+
 if __name__ == "__main__":
     main()

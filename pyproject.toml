@@ -29,6 +29,7 @@ dependencies = [
     "pandas>=2.0",
     "folium>=0.15",
     "openai>=1.0",
+    "flask>=3.0",
 ]
 
 [project.optional-dependencies]
