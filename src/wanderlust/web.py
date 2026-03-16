@@ -338,6 +338,109 @@ def _get_ai_response(messages):
             "In the meantime, review your trips and rate them — that helps me learn your preferences!")
 
 
+@app.route("/api/photo-locations")
+def api_photo_locations():
+    """Return all photo GPS points for heatmap display."""
+    points = []
+    for trip in STATE["trips"]:
+        # If we have individual photo locations, use those
+        if hasattr(trip, 'locations') and trip.locations:
+            for lat, lon in trip.locations:
+                points.append([lat, lon, 0.5])  # lat, lon, intensity
+        else:
+            # Use trip center with photo count as weight
+            intensity = min(1.0, trip.photo_count / 100)
+            points.append([trip.center_lat, trip.center_lon, intensity])
+    return jsonify(points)
+
+
+@app.route("/api/frequency")
+def api_frequency():
+    """Analyse visit frequency by region — how often we go back."""
+    from collections import defaultdict
+
+    # Group trips by region (country + rough area)
+    regions = defaultdict(list)
+    for trip in STATE["trips"]:
+        # Group by country, then by proximity (within 150km = same region)
+        key = trip.country or "Unknown"
+        matched = False
+        for region_key, region_trips in regions.items():
+            if region_key.startswith(key):
+                # Check if close to existing trips in this region
+                for rt in region_trips:
+                    if haversine_km(trip.center_lat, trip.center_lon, rt["lat"], rt["lon"]) < 150:
+                        region_trips.append({
+                            "name": trip.place_name, "lat": trip.center_lat, "lon": trip.center_lon,
+                            "year": trip.start_date.year, "month": trip.start_date.month,
+                            "days": trip.duration_days, "photos": trip.photo_count,
+                        })
+                        matched = True
+                        break
+                if matched:
+                    break
+
+        if not matched:
+            region_name = f"{key}: {trip.city or trip.place_name or 'Unknown'}"
+            regions[region_name].append({
+                "name": trip.place_name, "lat": trip.center_lat, "lon": trip.center_lon,
+                "year": trip.start_date.year, "month": trip.start_date.month,
+                "days": trip.duration_days, "photos": trip.photo_count,
+            })
+
+    # Build frequency analysis
+    result = []
+    for region, visits in sorted(regions.items(), key=lambda x: -len(x[1])):
+        years = sorted(set(v["year"] for v in visits))
+        total_days = sum(v["days"] for v in visits)
+        total_photos = sum(v["photos"] for v in visits)
+        avg_lat = sum(v["lat"] for v in visits) / len(visits)
+        avg_lon = sum(v["lon"] for v in visits) / len(visits)
+
+        year_range = max(years) - min(years) + 1 if years else 1
+        visits_per_year = len(visits) / year_range if year_range > 0 else len(visits)
+
+        result.append({
+            "region": region,
+            "visit_count": len(visits),
+            "visits_per_year": round(visits_per_year, 1),
+            "years": years,
+            "total_days": total_days,
+            "total_photos": total_photos,
+            "lat": avg_lat,
+            "lon": avg_lon,
+            "visits": visits,
+            "frequency_label": (
+                "Annual favourite" if visits_per_year >= 0.8 else
+                "Regular" if visits_per_year >= 0.4 else
+                "Occasional" if len(visits) >= 2 else
+                "One-off"
+            ),
+        })
+
+    return jsonify(result)
+
+
+@app.route("/api/timeline")
+def api_timeline():
+    """Return trips as timeline data grouped by year."""
+    from collections import defaultdict
+    by_year = defaultdict(list)
+    for trip in STATE["trips"]:
+        by_year[trip.start_date.year].append({
+            "name": trip.place_name,
+            "month": trip.start_date.month,
+            "days": trip.duration_days,
+            "family": trip.is_family_trip,
+            "country": trip.country,
+        })
+
+    return jsonify({
+        year: sorted(trips, key=lambda t: t["month"])
+        for year, trips in sorted(by_year.items())
+    })
+
+
 @app.route("/api/profile")
 def api_profile():
     if not STATE["profile"]:
@@ -391,7 +494,8 @@ INDEX_HTML = r"""
 
   .main { display: flex; flex-direction: column; overflow: hidden; }
 
-  #map { flex: 1; min-height: 300px; }
+  .main > div:first-child { flex: 1; position: relative; min-height: 300px; }
+  #map { position: absolute; inset: 0; }
 
   .trips-bar { padding: 12px; border-top: 1px solid var(--border); overflow-x: auto;
                display: flex; gap: 8px; flex-shrink: 0; }
@@ -458,6 +562,33 @@ INDEX_HTML = r"""
   .stat-box .value { font-size: 24px; font-weight: 700; color: var(--accent); }
   .stat-box .label { font-size: 12px; color: var(--dim); margin-top: 4px; }
 
+  /* Map controls */
+  .map-controls { position: absolute; top: 12px; left: 12px; z-index: 1000; display: flex; gap: 6px; }
+  .map-btn { padding: 6px 12px; border-radius: 6px; border: 1px solid var(--border); background: var(--surface);
+             color: var(--text); font-size: 12px; cursor: pointer; transition: all 0.2s; backdrop-filter: blur(8px); }
+  .map-btn:hover, .map-btn.active { border-color: var(--accent); color: var(--accent); }
+
+  /* Frequency panel in sidebar */
+  .freq-item { padding: 10px 14px; border-bottom: 1px solid var(--border); cursor: pointer; transition: background 0.2s; }
+  .freq-item:hover { background: var(--surface); }
+  .freq-region { font-weight: 600; font-size: 14px; }
+  .freq-badge { display: inline-block; padding: 2px 8px; border-radius: 10px; font-size: 11px; font-weight: 600; margin-left: 6px; }
+  .freq-badge.annual { background: var(--accent); color: var(--bg); }
+  .freq-badge.regular { background: var(--accent2); color: white; }
+  .freq-badge.occasional { background: #886600; color: white; }
+  .freq-badge.oneoff { background: var(--border); color: var(--dim); }
+  .freq-meta { font-size: 12px; color: var(--dim); margin-top: 3px; }
+  .freq-years { display: flex; gap: 4px; margin-top: 4px; }
+  .freq-year { padding: 1px 6px; border-radius: 4px; background: var(--border); font-size: 11px; color: var(--text); }
+
+  /* Timeline */
+  .timeline { padding: 16px; }
+  .timeline-year { margin-bottom: 16px; }
+  .timeline-year h4 { color: var(--accent); font-size: 14px; margin-bottom: 6px; }
+  .timeline-trips { display: flex; flex-wrap: wrap; gap: 4px; }
+  .timeline-trip { padding: 4px 8px; border-radius: 6px; font-size: 12px; border: 1px solid var(--border); }
+  .timeline-trip.family { border-color: var(--accent); color: var(--accent); }
+
   .quick-prompts { display: flex; flex-wrap: wrap; gap: 6px; padding: 8px 12px; border-top: 1px solid var(--border); flex-shrink: 0; }
   .quick-prompt { padding: 4px 10px; border-radius: 16px; border: 1px solid var(--border);
                   font-size: 12px; cursor: pointer; color: var(--dim); transition: all 0.2s; }
@@ -477,7 +608,14 @@ INDEX_HTML = r"""
   </div>
 
   <div class="main">
-    <div id="map"></div>
+    <div style="position:relative">
+      <div id="map"></div>
+      <div class="map-controls">
+        <button class="map-btn active" onclick="toggleLayer('markers',this)">📍 Trips</button>
+        <button class="map-btn" onclick="toggleLayer('heat',this)">🔥 Heatmap</button>
+        <button class="map-btn" onclick="toggleLayer('freq',this)">🔄 Frequency</button>
+      </div>
+    </div>
     <div class="trips-bar" id="tripsBar"></div>
   </div>
 
@@ -485,6 +623,7 @@ INDEX_HTML = r"""
     <div class="tabs">
       <div class="tab active" data-panel="chat">💬 Ask</div>
       <div class="tab" data-panel="review">⭐ Review</div>
+      <div class="tab" data-panel="frequency">🔄 Frequency</div>
       <div class="tab" data-panel="profile">📊 Profile</div>
     </div>
 
@@ -519,6 +658,12 @@ INDEX_HTML = r"""
       </div>
     </div>
 
+    <div class="panel" id="panel-frequency">
+      <div id="frequencyContent" style="overflow-y:auto;flex:1">
+        <p style="color:var(--dim);padding:20px;text-align:center">Loading frequency data...</p>
+      </div>
+    </div>
+
     <div class="panel" id="panel-profile">
       <div class="profile-content" id="profileContent">
         <p style="color:var(--dim)">Loading profile...</p>
@@ -528,12 +673,15 @@ INDEX_HTML = r"""
 </div>
 
 <script src="https://unpkg.com/leaflet@1.9/dist/leaflet.js"></script>
+<script src="https://unpkg.com/leaflet.heat@0.2/dist/leaflet-heat.js"></script>
 <script>
 // === STATE ===
 let trips = [];
 let chatHistory = [];
 let selectedTrip = null;
 let map, markers = {};
+let markerLayer, heatLayer, freqLayer;
+let layers = { markers: true, heat: false, freq: false };
 
 // === INIT ===
 async function init() {
@@ -553,14 +701,15 @@ async function init() {
   document.getElementById('countryCount').textContent = [...new Set(trips.map(t => t.country).filter(Boolean))].length;
   document.getElementById('reviewCount').textContent = trips.filter(t => t.reviewed).length;
 
-  // Add markers
+  // Marker layer
+  markerLayer = L.layerGroup().addTo(map);
   const bounds = [];
   trips.forEach(t => {
     const color = t.family ? '#00cc88' : '#0088ff';
     const radius = Math.max(6, Math.min(18, t.photos / 8));
     const marker = L.circleMarker([t.lat, t.lon], {
       radius, color, fillColor: color, fillOpacity: 0.6, weight: 2
-    }).addTo(map);
+    }).addTo(markerLayer);
 
     const rating = t.rating ? '⭐'.repeat(t.rating) : '<span style="color:#ff6644">Not reviewed</span>';
     marker.bindPopup(`<b>${t.name || 'Unknown'}</b><br>${new Date(t.start).toLocaleDateString('en-GB', {month:'short',year:'numeric'})}<br>${t.days} days, ${t.photos} photos<br>${rating}`);
@@ -570,6 +719,37 @@ async function init() {
   });
 
   if (bounds.length) map.fitBounds(bounds, { padding: [30, 30] });
+
+  // Load heatmap data
+  const heatResp = await fetch('api/photo-locations');
+  const heatPoints = await heatResp.json();
+  heatLayer = L.heatLayer(heatPoints, {
+    radius: 25, blur: 20, maxZoom: 10,
+    gradient: {0.2: '#0044ff', 0.4: '#00ccff', 0.6: '#00ff88', 0.8: '#ffcc00', 1.0: '#ff4400'}
+  });
+
+  // Load frequency data for map overlay
+  const freqResp = await fetch('api/frequency');
+  const freqData = await freqResp.json();
+  freqLayer = L.layerGroup();
+  freqData.forEach(f => {
+    const colors = { 'Annual favourite': '#00cc88', 'Regular': '#0088ff', 'Occasional': '#886600', 'One-off': '#4a4a5a' };
+    const color = colors[f.frequency_label] || '#4a4a5a';
+    const circle = L.circle([f.lat, f.lon], {
+      radius: Math.max(30000, f.visit_count * 40000),
+      color, fillColor: color, fillOpacity: 0.2, weight: 2, dashArray: f.visit_count > 1 ? '' : '5,5'
+    });
+    circle.bindPopup(
+      `<b>${f.region}</b><br>` +
+      `Visited <b>${f.visit_count}x</b> (${f.frequency_label})<br>` +
+      `${f.total_days} total days, ${f.total_photos} photos<br>` +
+      `Years: ${f.years.join(', ')}`
+    );
+    circle.addTo(freqLayer);
+  });
+
+  // Render frequency sidebar
+  renderFrequency(freqData);
 
   // Trip cards
   renderTripCards();
@@ -789,6 +969,65 @@ async function loadProfile() {
   } catch(e) {
     document.getElementById('profileContent').innerHTML = '<p style="color:var(--dim)">Run <code>wanderlust scan</code> first to load trips</p>';
   }
+}
+
+// === MAP LAYERS ===
+function toggleLayer(name, btn) {
+  layers[name] = !layers[name];
+  btn.classList.toggle('active', layers[name]);
+
+  if (name === 'markers') { layers[name] ? markerLayer.addTo(map) : map.removeLayer(markerLayer); }
+  if (name === 'heat') { layers[name] ? heatLayer.addTo(map) : map.removeLayer(heatLayer); }
+  if (name === 'freq') { layers[name] ? freqLayer.addTo(map) : map.removeLayer(freqLayer); }
+}
+
+// === FREQUENCY ===
+function renderFrequency(data) {
+  const container = document.getElementById('frequencyContent');
+  if (!data.length) { container.innerHTML = '<p style="color:var(--dim);padding:20px">No trip data yet</p>'; return; }
+
+  const badgeClass = {'Annual favourite':'annual','Regular':'regular','Occasional':'occasional','One-off':'oneoff'};
+
+  let html = '<div style="padding:12px 14px;border-bottom:1px solid var(--border);font-size:13px;color:var(--dim)">' +
+    'How often you visit each region — based on ' + trips.length + ' trips</div>';
+
+  data.sort((a,b) => b.visit_count - a.visit_count);
+
+  data.forEach(f => {
+    html += `<div class="freq-item" onclick="map.setView([${f.lat},${f.lon}],6)">
+      <div>
+        <span class="freq-region">${f.region}</span>
+        <span class="freq-badge ${badgeClass[f.frequency_label] || 'oneoff'}">${f.frequency_label}</span>
+      </div>
+      <div class="freq-meta">${f.visit_count} visit${f.visit_count>1?'s':''} · ${f.total_days} days · ${f.total_photos} photos</div>
+      <div class="freq-years">${f.years.map(y => `<span class="freq-year">${y}</span>`).join('')}</div>
+    </div>`;
+  });
+
+  // Timeline at bottom
+  html += '<div style="padding:12px 14px;border-top:2px solid var(--border);margin-top:8px">';
+  html += '<h4 style="color:var(--accent);margin-bottom:8px">📅 Timeline</h4>';
+
+  const byYear = {};
+  trips.forEach(t => {
+    const y = new Date(t.start).getFullYear();
+    if (!byYear[y]) byYear[y] = [];
+    byYear[y].push(t);
+  });
+
+  Object.keys(byYear).sort((a,b) => b-a).forEach(year => {
+    html += `<div style="margin-bottom:10px"><div style="font-size:13px;font-weight:600;color:var(--text);margin-bottom:4px">${year}</div>`;
+    html += '<div style="display:flex;flex-wrap:wrap;gap:4px">';
+    byYear[year].sort((a,b) => new Date(a.start) - new Date(b.start)).forEach(t => {
+      const month = new Date(t.start).toLocaleDateString('en-GB', {month:'short'});
+      const cls = t.family ? 'family' : '';
+      html += `<span class="timeline-trip ${cls}">${month}: ${t.name || '?'}</span>`;
+    });
+    html += '</div></div>';
+  });
+  html += '</div>';
+
+  container.innerHTML = html;
 }
 
 // === BOOT ===
