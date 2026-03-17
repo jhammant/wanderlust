@@ -12,6 +12,14 @@ import json
 import os
 from pathlib import Path
 from datetime import datetime
+
+# Fix SSL cert verification on macOS with Homebrew Python
+try:
+    import certifi
+    os.environ.setdefault("SSL_CERT_FILE", certifi.where())
+except ImportError:
+    pass
+
 from flask import Flask, render_template_string, jsonify, request, send_from_directory
 
 from .clusterer import Trip, haversine_km
@@ -67,7 +75,11 @@ def _deserialize_trips(data):
             city=d.get("city"),
             place_name=d.get("place_name"),
             people=d.get("people", []),
+            people_counts=d.get("people_counts", {}),
             is_family_trip=d.get("is_family_trip", False),
+            trip_type=d.get("trip_type", "stay"),
+            spread_km=d.get("spread_km", 0.0),
+            stops=d.get("stops", []),
             photo_count=d.get("photo_count", 0),
             favorite_count=d.get("favorite_count", 0),
         )
@@ -225,7 +237,11 @@ def api_trips():
             "days": t.duration_days,
             "photos": t.photo_count,
             "people": t.people,
+            "people_counts": getattr(t, 'people_counts', {}),
             "family": t.is_family_trip,
+            "trip_type": getattr(t, 'trip_type', 'stay'),
+            "spread_km": getattr(t, 'spread_km', 0),
+            "stops": getattr(t, 'stops', []),
             "season": t.season,
             "rating": review.get("overall"),
             "reviewed": bool(review),
@@ -258,6 +274,193 @@ def api_exclusions():
     return jsonify(get_exclusion_zones())
 
 
+@app.route("/api/photo/<uuid>")
+def api_photo(uuid):
+    """Serve a photo thumbnail by UUID, pulling from iCloud if needed."""
+    from flask import send_file
+
+    thumb_dir = Path.home() / ".wanderlust" / "thumbs"
+    thumb_dir.mkdir(parents=True, exist_ok=True)
+    thumb_path = thumb_dir / f"{uuid}.jpg"
+
+    # Return cached thumbnail if exists
+    if thumb_path.exists():
+        return send_file(str(thumb_path), mimetype="image/jpeg")
+
+    # Try PyObjC Photos framework (handles iCloud transparently)
+    try:
+        from Photos import PHAsset, PHImageManager, PHImageRequestOptions, PHFetchOptions, PHImageContentModeAspectFill
+        from AppKit import NSSize, NSBitmapImageRep, NSJPEGFileType
+        from Foundation import NSPredicate
+
+        pred = NSPredicate.predicateWithFormat_('localIdentifier BEGINSWITH %@', uuid)
+        fetch_opts = PHFetchOptions.alloc().init()
+        fetch_opts.setPredicate_(pred)
+        result = PHAsset.fetchAssetsWithOptions_(fetch_opts)
+
+        if result.count() > 0:
+            asset = result.objectAtIndex_(0)
+            manager = PHImageManager.defaultManager()
+            req_opts = PHImageRequestOptions.alloc().init()
+            req_opts.setSynchronous_(True)
+            req_opts.setNetworkAccessAllowed_(True)
+            req_opts.setDeliveryMode_(1)  # Fast
+
+            img_holder = [None]
+            def handler(img, info):
+                img_holder[0] = img
+
+            manager.requestImageForAsset_targetSize_contentMode_options_resultHandler_(
+                asset, NSSize(300, 300), PHImageContentModeAspectFill, req_opts, handler
+            )
+
+            img = img_holder[0]
+            if img:
+                rep = NSBitmapImageRep.imageRepWithData_(img.TIFFRepresentation())
+                jpeg = rep.representationUsingType_properties_(NSJPEGFileType, {})
+                with open(str(thumb_path), 'wb') as f:
+                    f.write(jpeg)
+                return send_file(str(thumb_path), mimetype="image/jpeg")
+    except Exception:
+        pass
+
+    # Fallback: try local originals with sips
+    import subprocess
+    library_path = os.environ.get("PHOTOS_LIBRARY",
+        str(Path.home() / "Pictures" / "Photos Library.photoslibrary"))
+    prefix = uuid[0].upper()
+    originals_dir = Path(library_path) / "originals" / prefix
+
+    photo_path = None
+    if originals_dir.exists():
+        for f in originals_dir.iterdir():
+            if f.stem == uuid:
+                photo_path = f
+                break
+
+    if photo_path and photo_path.exists():
+        try:
+            subprocess.run(
+                ["sips", "-z", "300", "300", "-s", "format", "jpeg",
+                 str(photo_path), "--out", str(thumb_path)],
+                capture_output=True, timeout=10
+            )
+            if thumb_path.exists():
+                return send_file(str(thumb_path), mimetype="image/jpeg")
+        except Exception:
+            pass
+
+    return "", 204
+
+
+@app.route("/api/trip/<int:trip_id>/photos")
+def api_trip_photos(trip_id):
+    """Return photo UUIDs for a trip by querying the Photos database directly."""
+    import sqlite3
+    from .scanner import find_photos_db, core_data_to_datetime, CORE_DATA_EPOCH
+
+    trip = next((t for t in STATE["trips"] if t.id == trip_id), None)
+    if not trip:
+        return jsonify([])
+
+    try:
+        db_path = find_photos_db()
+    except FileNotFoundError:
+        return jsonify([])
+
+    conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
+    conn.row_factory = sqlite3.Row
+
+    # Convert trip dates to Core Data timestamps
+    from datetime import timedelta
+    start_ts = (trip.start_date - CORE_DATA_EPOCH).total_seconds()
+    end_ts = (trip.end_date - CORE_DATA_EPOCH + timedelta(days=1)).total_seconds()
+
+    # Query photos in date range, near trip center (within ~50km ≈ 0.5 degrees)
+    rows = conn.execute("""
+        SELECT ZUUID, ZDATECREATED, ZFAVORITE, ZLATITUDE, ZLONGITUDE
+        FROM ZASSET
+        WHERE ZDATECREATED BETWEEN ? AND ?
+          AND ZLATITUDE BETWEEN ? AND ?
+          AND ZLONGITUDE BETWEEN ? AND ?
+          AND ZTRASHEDSTATE = 0
+        ORDER BY ZFAVORITE DESC, ZDATECREATED
+    """, (
+        start_ts, end_ts,
+        trip.center_lat - 2, trip.center_lat + 2,
+        trip.center_lon - 2, trip.center_lon + 2,
+    )).fetchall()
+    conn.close()
+
+    # Sample up to 20 photos (favorites first)
+    selected = rows[:20]
+
+    return jsonify([{
+        "uuid": r["ZUUID"],
+        "timestamp": core_data_to_datetime(r["ZDATECREATED"]).isoformat() if r["ZDATECREATED"] else None,
+        "favorite": bool(r["ZFAVORITE"]),
+        "faces": [],
+    } for r in selected])
+
+
+@app.route("/api/trip/<int:trip_id>/detail")
+def api_trip_detail(trip_id):
+    """Return rich trip detail for the drill-down panel."""
+    trip = next((t for t in STATE["trips"] if t.id == trip_id), None)
+    if not trip:
+        return jsonify({"error": "Trip not found"}), 404
+
+    review = STATE["reviews"].get(str(trip_id), {})
+
+    # Day-by-day breakdown
+    from collections import defaultdict
+    by_day = defaultdict(int)
+    if hasattr(trip, 'photos') and trip.photos:
+        for p in trip.photos:
+            by_day[p.timestamp.strftime("%Y-%m-%d")] += 1
+
+    days = [{"date": d, "photos": c} for d, c in sorted(by_day.items())]
+
+    return jsonify({
+        "id": trip.id,
+        "name": trip.place_name,
+        "city": trip.city,
+        "country": trip.country,
+        "lat": trip.center_lat,
+        "lon": trip.center_lon,
+        "start": trip.start_date.isoformat(),
+        "end": trip.end_date.isoformat(),
+        "days": trip.duration_days,
+        "photos": trip.photo_count,
+        "favorites": trip.favorite_count,
+        "people": trip.people,
+        "people_counts": getattr(trip, 'people_counts', {}),
+        "family": trip.is_family_trip,
+        "trip_type": getattr(trip, 'trip_type', 'stay'),
+        "spread_km": getattr(trip, 'spread_km', 0),
+        "stops": getattr(trip, 'stops', []),
+        "season": trip.season,
+        "rating": review.get("overall"),
+        "review": review,
+        "daily_breakdown": days,
+    })
+
+
+@app.route("/api/trip/<int:trip_id>/enrich", methods=["POST"])
+def api_enrich_trip(trip_id):
+    """Generate an AI narrative for a trip from its photo metadata."""
+    from .enricher import enrich_trip
+    trip = next((t for t in STATE["trips"] if t.id == trip_id), None)
+    if not trip:
+        return jsonify({"error": "Trip not found"}), 404
+
+    provider = request.json.get("provider", "ollama") if request.json else "ollama"
+    model = request.json.get("model") if request.json else None
+
+    narrative = enrich_trip(trip, provider=provider, model=model)
+    return jsonify({"narrative": narrative, "trip_id": trip_id})
+
+
 @app.route("/api/chat", methods=["POST"])
 def api_chat():
     """Chat endpoint for recommendation conversation."""
@@ -280,7 +483,7 @@ RULES:
 3. Reference their actual past trips when explaining recommendations
 4. Ask clarifying questions before jumping to suggestions
 5. Be specific — name actual towns/regions, not just countries
-6. Consider their kids (ages 4, 7, 8) for family trips
+6. Consider their kids (Clara age 10, Zoe age 7, Ethan age 4) for family trips
 7. Factor in their travel patterns (seasons, duration, style)
 
 {context}
@@ -304,6 +507,22 @@ RULES:
 
 def _get_ai_response(messages):
     """Try available AI providers in order."""
+    # Try OpenRouter first (cheapest, multi-model)
+    or_key = os.environ.get("OPENROUTER_API_KEY")
+    if or_key:
+        try:
+            from openai import OpenAI
+            client = OpenAI(api_key=or_key, base_url="https://openrouter.ai/api/v1")
+            resp = client.chat.completions.create(
+                model="anthropic/claude-sonnet-4",
+                messages=messages,
+                temperature=0.8,
+                max_tokens=1500,
+            )
+            return resp.choices[0].message.content
+        except Exception as e:
+            pass
+
     # Try OpenAI
     api_key = os.environ.get("OPENAI_API_KEY")
     if api_key:
@@ -334,7 +553,7 @@ def _get_ai_response(messages):
         pass
 
     return ("I'm not connected to an AI provider right now. "
-            "Set OPENAI_API_KEY or start Ollama to get personalised recommendations. "
+            "Set OPENROUTER_API_KEY, OPENAI_API_KEY, or start Ollama to get personalised recommendations. "
             "In the meantime, review your trips and rate them — that helps me learn your preferences!")
 
 
@@ -477,42 +696,48 @@ INDEX_HTML = r"""
   :root {
     --bg: #0a0a0f; --surface: #14141f; --border: #2a2a3a;
     --text: #e0e0e8; --dim: #6a6a7a; --accent: #00cc88;
-    --accent2: #0088ff; --warn: #ff6644; --radius: 12px;
+    --accent2: #0088ff; --warn: #ff6644; --gold: #ffd700; --radius: 12px;
   }
   * { box-sizing: border-box; margin: 0; padding: 0; }
   body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
-         background: var(--bg); color: var(--text); min-height: 100vh; }
+         background: var(--bg); color: var(--text); min-height: 100vh;
+         font-size: 14px; line-height: 1.5; }
 
   .app { display: grid; grid-template-columns: 1fr 400px; grid-template-rows: auto 1fr; height: 100vh; }
 
-  .header { grid-column: 1 / -1; padding: 16px 24px; border-bottom: 1px solid var(--border);
+  .header { grid-column: 1 / -1; padding: 14px 24px; border-bottom: 1px solid var(--border);
             display: flex; align-items: center; gap: 16px; }
-  .header h1 { font-size: 20px; }
+  .header h1 { font-size: 18px; font-weight: 600; }
   .header h1 span { color: var(--accent); }
-  .header .stats { margin-left: auto; display: flex; gap: 24px; font-size: 13px; color: var(--dim); }
-  .header .stats b { color: var(--accent); font-size: 16px; }
+  .header .stats { margin-left: auto; display: flex; gap: 20px; font-size: 12px; color: var(--dim); }
+  .header .stats b { color: var(--accent); font-size: 15px; }
 
   .main { display: flex; flex-direction: column; overflow: hidden; }
 
   .main > div:first-child { flex: 1; position: relative; min-height: 300px; }
   #map { position: absolute; inset: 0; }
 
-  .trips-bar { padding: 12px; border-top: 1px solid var(--border); overflow-x: auto;
-               display: flex; gap: 8px; flex-shrink: 0; }
+  /* Trip cards - bottom bar */
+  .trips-bar { padding: 8px 10px; border-top: 1px solid var(--border); overflow-x: auto;
+               display: flex; gap: 6px; flex-shrink: 0; }
   .trip-card { flex-shrink: 0; background: var(--surface); border: 1px solid var(--border);
-               border-radius: var(--radius); padding: 10px 14px; cursor: pointer; min-width: 150px;
-               transition: border-color 0.2s; }
-  .trip-card:hover, .trip-card.active { border-color: var(--accent); }
-  .trip-card .name { font-weight: 600; font-size: 14px; white-space: nowrap; }
-  .trip-card .meta { font-size: 12px; color: var(--dim); margin-top: 2px; }
-  .trip-card .rating { color: #ffd700; font-size: 12px; }
-  .trip-card .unreviewed { color: var(--warn); font-size: 11px; }
+               border-radius: 8px; padding: 7px 10px; cursor: pointer; min-width: 130px;
+               transition: border-color 0.2s, transform 0.15s;
+               border-left: 3px solid var(--warn); }
+  .trip-card.reviewed { border-left-color: var(--accent); }
+  .trip-card:hover { border-color: var(--accent); transform: translateY(-1px); }
+  .trip-card.active { border-color: var(--accent); }
+  .trip-card .name { font-weight: 600; font-size: 12px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 140px; }
+  .trip-card .meta { font-size: 11px; color: var(--dim); margin-top: 1px; }
+  .trip-card .rating { color: var(--gold); font-size: 11px; letter-spacing: -1px; }
+  .trip-card .unreviewed { color: var(--dim); font-size: 10px; font-style: italic; }
 
   .sidebar { border-left: 1px solid var(--border); display: flex; flex-direction: column; overflow: hidden; }
 
   .tabs { display: flex; border-bottom: 1px solid var(--border); flex-shrink: 0; }
-  .tab { flex: 1; padding: 12px; text-align: center; font-size: 13px; font-weight: 500;
-         cursor: pointer; border-bottom: 2px solid transparent; color: var(--dim); transition: all 0.2s; }
+  .tab { flex: 1; padding: 10px; text-align: center; font-size: 12px; font-weight: 500;
+         cursor: pointer; border-bottom: 2px solid transparent; color: var(--dim);
+         transition: color 0.2s, border-color 0.2s; }
   .tab:hover { color: var(--text); }
   .tab.active { color: var(--accent); border-bottom-color: var(--accent); }
 
@@ -520,29 +745,72 @@ INDEX_HTML = r"""
   .panel.active { display: flex; flex-direction: column; }
 
   /* Chat panel */
-  .chat-messages { flex: 1; overflow-y: auto; padding: 16px; display: flex; flex-direction: column; gap: 12px; }
-  .msg { max-width: 90%; padding: 10px 14px; border-radius: var(--radius); font-size: 14px; line-height: 1.5; }
-  .msg.user { align-self: flex-end; background: var(--accent2); color: white; }
-  .msg.ai { align-self: flex-start; background: var(--surface); border: 1px solid var(--border); }
-  .msg.ai .thinking { color: var(--dim); font-style: italic; }
+  .chat-messages { flex: 1; overflow-y: auto; padding: 14px; display: flex; flex-direction: column; gap: 10px; }
+  .msg { max-width: 90%; padding: 10px 14px; border-radius: var(--radius); font-size: 13px; line-height: 1.65; }
+  .msg.user { align-self: flex-end; background: var(--accent2); color: white; border-bottom-right-radius: 4px; }
+  .msg.ai { align-self: flex-start; background: var(--surface); border: 1px solid var(--border); border-bottom-left-radius: 4px; }
+  .msg.ai p { margin-bottom: 6px; }
+  .msg.ai p:last-child { margin-bottom: 0; }
+  .msg.ai ul, .msg.ai ol { margin: 4px 0 6px 18px; }
+  .msg.ai li { margin-bottom: 2px; }
+  .msg.ai strong { color: var(--accent); }
+  .msg.ai em { color: var(--dim); }
 
-  .chat-input { display: flex; gap: 8px; padding: 12px; border-top: 1px solid var(--border); flex-shrink: 0; }
+  /* Pulsing dots thinking indicator */
+  .thinking-dots { display: inline-flex; gap: 4px; align-items: center; padding: 4px 0; }
+  .thinking-dots span { width: 6px; height: 6px; border-radius: 50%; background: var(--dim);
+    animation: pulse-dot 1.4s infinite ease-in-out; }
+  .thinking-dots span:nth-child(2) { animation-delay: 0.2s; }
+  .thinking-dots span:nth-child(3) { animation-delay: 0.4s; }
+  @keyframes pulse-dot {
+    0%, 80%, 100% { opacity: 0.3; transform: scale(0.8); }
+    40% { opacity: 1; transform: scale(1.1); }
+  }
+
+  .chat-input { display: flex; gap: 8px; padding: 10px 12px; border-top: 1px solid var(--border); flex-shrink: 0; }
   .chat-input input { flex: 1; background: var(--surface); border: 1px solid var(--border);
-                       border-radius: 8px; padding: 10px 14px; color: var(--text); font-size: 14px; outline: none; }
+                       border-radius: 8px; padding: 9px 14px; color: var(--text); font-size: 13px; outline: none;
+                       transition: border-color 0.2s; }
   .chat-input input:focus { border-color: var(--accent); }
   .chat-input button { background: var(--accent); color: var(--bg); border: none; border-radius: 8px;
-                        padding: 10px 16px; font-weight: 600; cursor: pointer; }
-  .chat-input button:disabled { opacity: 0.5; cursor: default; }
+                        padding: 9px 14px; font-weight: 600; cursor: pointer; font-size: 13px;
+                        transition: opacity 0.2s; }
+  .chat-input button:disabled { opacity: 0.4; cursor: default; }
 
-  /* Review panel */
-  .review-content { padding: 16px; }
-  .review-content h3 { margin-bottom: 12px; }
-  .question { margin-bottom: 20px; }
-  .question label { display: block; font-size: 14px; font-weight: 500; margin-bottom: 8px; }
+  /* Review / Detail panel */
+  .review-content { padding: 0; }
+  .review-content h3 { margin-bottom: 8px; font-size: 16px; }
+  .detail-section { margin-top: 14px; }
+  .detail-section-title { font-size: 11px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.5px;
+                          color: var(--dim); margin-bottom: 6px; }
+  .inline-stars { display: flex; gap: 2px; }
+  .inline-star { font-size: 22px; cursor: pointer; color: var(--border); transition: color 0.15s; line-height: 1; }
+  .inline-star.filled { color: var(--gold); }
+  .inline-star:hover { color: var(--gold); }
+  .highlight-chips { display: flex; flex-wrap: wrap; gap: 5px; }
+  .highlight-chip { padding: 4px 10px; border-radius: 16px; border: 1px solid var(--border);
+                    font-size: 12px; cursor: pointer; transition: all 0.15s; user-select: none; }
+  .highlight-chip.selected { background: rgba(0,204,136,0.15); color: var(--accent); border-color: var(--accent); }
+  .highlight-chip:hover { border-color: var(--accent); }
+  .return-btns { display: flex; gap: 6px; }
+  .return-btn { padding: 5px 12px; border-radius: 16px; border: 1px solid var(--border);
+                font-size: 12px; cursor: pointer; transition: all 0.15s; user-select: none; background: none; color: var(--text); }
+  .return-btn.selected { background: var(--accent); color: var(--bg); border-color: var(--accent); }
+  .return-btn:hover { border-color: var(--accent); }
+  textarea.inline-notes { width: 100%; background: var(--surface); border: 1px solid var(--border);
+                          border-radius: 8px; padding: 8px 10px; color: var(--text); font-size: 12px;
+                          resize: vertical; min-height: 50px; outline: none; font-family: inherit;
+                          transition: border-color 0.2s; }
+  textarea.inline-notes:focus { border-color: var(--accent); }
+  .more-like-btn { background: none; border: 1px solid var(--accent2); color: var(--accent2); border-radius: 8px;
+                   padding: 6px 14px; font-size: 12px; cursor: pointer; transition: all 0.2s; font-weight: 500; }
+  .more-like-btn:hover { background: var(--accent2); color: white; }
+  .autosave-indicator { font-size: 10px; color: var(--dim); font-style: italic; transition: opacity 0.3s; }
+
   .stars { display: flex; gap: 4px; }
   .star { font-size: 24px; cursor: pointer; color: var(--border); transition: color 0.2s; }
-  .star.filled { color: #ffd700; }
-  .star:hover { color: #ffd700; }
+  .star.filled { color: var(--gold); }
+  .star:hover { color: var(--gold); }
   .options { display: flex; flex-wrap: wrap; gap: 6px; }
   .opt { padding: 6px 12px; border-radius: 20px; border: 1px solid var(--border);
          font-size: 13px; cursor: pointer; transition: all 0.2s; user-select: none; }
@@ -552,15 +820,15 @@ INDEX_HTML = r"""
                           border-radius: 8px; padding: 10px; color: var(--text); font-size: 14px;
                           resize: vertical; min-height: 60px; outline: none; }
   .save-btn { background: var(--accent); color: var(--bg); border: none; border-radius: 8px;
-              padding: 10px 20px; font-weight: 600; cursor: pointer; margin-top: 12px; }
+              padding: 8px 16px; font-weight: 600; cursor: pointer; margin-top: 10px; font-size: 12px; }
 
   /* Profile panel */
   .profile-content { padding: 16px; }
-  .stat-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; margin-bottom: 16px; }
+  .stat-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; margin-bottom: 14px; }
   .stat-box { background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius);
-              padding: 12px; text-align: center; }
-  .stat-box .value { font-size: 24px; font-weight: 700; color: var(--accent); }
-  .stat-box .label { font-size: 12px; color: var(--dim); margin-top: 4px; }
+              padding: 10px; text-align: center; }
+  .stat-box .value { font-size: 22px; font-weight: 700; color: var(--accent); }
+  .stat-box .label { font-size: 11px; color: var(--dim); margin-top: 3px; }
 
   /* Map controls */
   .map-controls { position: absolute; top: 12px; left: 12px; z-index: 1000; display: flex; gap: 6px; }
@@ -589,10 +857,36 @@ INDEX_HTML = r"""
   .timeline-trip { padding: 4px 8px; border-radius: 6px; font-size: 12px; border: 1px solid var(--border); }
   .timeline-trip.family { border-color: var(--accent); color: var(--accent); }
 
-  .quick-prompts { display: flex; flex-wrap: wrap; gap: 6px; padding: 8px 12px; border-top: 1px solid var(--border); flex-shrink: 0; }
-  .quick-prompt { padding: 4px 10px; border-radius: 16px; border: 1px solid var(--border);
-                  font-size: 12px; cursor: pointer; color: var(--dim); transition: all 0.2s; }
-  .quick-prompt:hover { border-color: var(--accent); color: var(--text); }
+  .quick-prompts { display: flex; flex-wrap: wrap; gap: 5px; padding: 6px 12px; border-top: 1px solid var(--border); flex-shrink: 0; }
+  .quick-prompt { padding: 3px 9px; border-radius: 14px; border: 1px solid rgba(42,42,58,0.6);
+                  font-size: 11px; cursor: pointer; color: var(--dim); transition: all 0.2s;
+                  background: none; }
+  .quick-prompt:hover { border-color: var(--accent); color: var(--text); background: rgba(0,204,136,0.06); }
+
+  .stop-number { background: none !important; border: none !important; box-shadow: none !important;
+                  color: var(--bg) !important; font-size: 10px !important; font-weight: 700 !important; padding: 0 !important; }
+
+  /* Dark Leaflet popups */
+  .leaflet-popup-content-wrapper { background: var(--surface) !important; color: var(--text) !important; border: 1px solid var(--border) !important; border-radius: var(--radius) !important; box-shadow: 0 4px 16px rgba(0,0,0,0.4) !important; }
+  .leaflet-popup-tip { background: var(--surface) !important; border: 1px solid var(--border) !important; }
+  .leaflet-popup-close-button { color: var(--dim) !important; }
+
+  /* Scrollbar styling */
+  ::-webkit-scrollbar { width: 6px; }
+  ::-webkit-scrollbar-track { background: transparent; }
+  ::-webkit-scrollbar-thumb { background: var(--border); border-radius: 3px; }
+
+  /* Trip card polish */
+  .trip-card { box-shadow: 0 1px 3px rgba(0,0,0,0.2); }
+  .trip-card:hover { box-shadow: 0 4px 12px rgba(0,0,0,0.35); }
+  .trip-card.reviewed { border-left-color: var(--accent); }
+
+  /* Chat message entrance animation */
+  @keyframes msg-fade-in {
+    from { opacity: 0; transform: translateY(8px); }
+    to { opacity: 1; transform: translateY(0); }
+  }
+  .msg { animation: msg-fade-in 0.3s ease-out; }
 </style>
 </head>
 <body>
@@ -604,6 +898,7 @@ INDEX_HTML = r"""
       <div><b id="tripCount">0</b> trips</div>
       <div><b id="countryCount">0</b> countries</div>
       <div><b id="reviewCount">0</b> reviewed</div>
+      <button class="map-btn" style="margin-left:8px" onclick="quickReview()">⚡ Quick review</button>
     </div>
   </div>
 
@@ -614,6 +909,24 @@ INDEX_HTML = r"""
         <button class="map-btn active" onclick="toggleLayer('markers',this)">📍 Trips</button>
         <button class="map-btn" onclick="toggleLayer('heat',this)">🔥 Heatmap</button>
         <button class="map-btn" onclick="toggleLayer('freq',this)">🔄 Frequency</button>
+        <span style="width:1px;background:var(--border);margin:0 4px"></span>
+        <button class="map-btn" onclick="filterType('all',this)">All</button>
+        <button class="map-btn" onclick="filterType('stay',this)">🏨 Stays</button>
+        <button class="map-btn" onclick="filterType('road trip',this)">🚗 Road trips</button>
+        <button class="map-btn" onclick="filterType('day trip',this)">📍 Day trips</button>
+        <span style="width:1px;background:var(--border);margin:0 4px"></span>
+        <div style="position:relative;display:inline-block" id="peopleFilterWrap">
+          <button class="map-btn" onclick="togglePeopleDropdown()" id="peopleFilterBtn">👥 People</button>
+          <div id="peopleDropdown" style="display:none;position:absolute;top:100%;left:0;margin-top:4px;background:var(--surface);border:1px solid var(--border);border-radius:8px;padding:6px;min-width:200px;max-height:300px;overflow-y:auto;z-index:2000">
+          </div>
+        </div>
+        <div style="position:relative;display:inline-block" id="yearFilterWrap">
+          <button class="map-btn" onclick="toggleYearDropdown()" id="yearFilterBtn">📅 Years</button>
+          <div id="yearDropdown" style="display:none;position:absolute;top:100%;left:0;margin-top:4px;background:var(--surface);border:1px solid var(--border);border-radius:8px;padding:6px;min-width:120px;max-height:300px;overflow-y:auto;z-index:2000">
+          </div>
+        </div>
+        <button class="map-btn" id="soloFilterBtn" onclick="toggleSoloFilter(this)">👤 Hide solo</button>
+        <button class="map-btn" id="unreviewedFilterBtn" onclick="toggleUnreviewedFilter(this)">⚠ Unreviewed</button>
       </div>
     </div>
     <div class="trips-bar" id="tripsBar"></div>
@@ -623,7 +936,8 @@ INDEX_HTML = r"""
     <div class="tabs">
       <div class="tab active" data-panel="chat">💬 Ask</div>
       <div class="tab" data-panel="review">⭐ Review</div>
-      <div class="tab" data-panel="frequency">🔄 Frequency</div>
+      <div class="tab" data-panel="timeline">📅 Timeline</div>
+      <div class="tab" data-panel="frequency">🔄 Freq</div>
       <div class="tab" data-panel="profile">📊 Profile</div>
     </div>
 
@@ -655,6 +969,12 @@ INDEX_HTML = r"""
         <p style="color:var(--dim);padding:20px;text-align:center">
           Click a trip on the map or in the bar below to review it
         </p>
+      </div>
+    </div>
+
+    <div class="panel" id="panel-timeline" style="overflow-y:auto">
+      <div id="timelineContent" style="padding:16px">
+        <p style="color:var(--dim)">Loading timeline...</p>
       </div>
     </div>
 
@@ -706,14 +1026,22 @@ async function init() {
   const bounds = [];
   trips.forEach(t => {
     const color = t.family ? '#00cc88' : '#0088ff';
-    const radius = Math.max(6, Math.min(18, t.photos / 8));
+    const radius = Math.max(8, Math.min(16, t.photos / 10));
     const marker = L.circleMarker([t.lat, t.lon], {
       radius, color, fillColor: color, fillOpacity: 0.6, weight: 2
     }).addTo(markerLayer);
 
     const rating = t.rating ? '⭐'.repeat(t.rating) : '<span style="color:#ff6644">Not reviewed</span>';
-    marker.bindPopup(`<b>${t.name || 'Unknown'}</b><br>${new Date(t.start).toLocaleDateString('en-GB', {month:'short',year:'numeric'})}<br>${t.days} days, ${t.photos} photos<br>${rating}`);
+    const peopleHtml = t.people.length
+      ? '<br>👥 ' + t.people.map(p => {
+          const count = t.people_counts?.[p];
+          return count ? `${p} <span style="opacity:0.6">(${count} photos)</span>` : p;
+        }).join(', ')
+      : '';
+    const familyBadge = t.family ? ' <span style="color:#00cc88">👨‍👩‍👧 Family</span>' : '';
+    marker.bindPopup(`<b>${t.name || 'Unknown'}</b>${familyBadge}<br>${new Date(t.start).toLocaleDateString('en-GB', {month:'short',year:'numeric'})} — ${new Date(t.end).toLocaleDateString('en-GB', {month:'short',year:'numeric'})}<br>${t.days} days, ${t.photos} photos${peopleHtml}<br>${rating}`);
     marker.on('click', () => selectTrip(t.id));
+    marker.on('mouseover', function() { this.bringToFront(); });
     markers[t.id] = marker;
     bounds.push([t.lat, t.lon]);
   });
@@ -736,7 +1064,7 @@ async function init() {
     const colors = { 'Annual favourite': '#00cc88', 'Regular': '#0088ff', 'Occasional': '#886600', 'One-off': '#4a4a5a' };
     const color = colors[f.frequency_label] || '#4a4a5a';
     const circle = L.circle([f.lat, f.lon], {
-      radius: Math.max(30000, f.visit_count * 40000),
+      radius: Math.max(20000, f.visit_count * 25000),
       color, fillColor: color, fillOpacity: 0.2, weight: 2, dashArray: f.visit_count > 1 ? '' : '5,5'
     });
     circle.bindPopup(
@@ -754,6 +1082,12 @@ async function init() {
   // Trip cards
   renderTripCards();
 
+  // Populate people filter dropdown
+  populatePeopleFilter();
+
+  // Render timeline
+  renderTimeline(trips);
+
   // Load profile
   loadProfile();
 }
@@ -761,108 +1095,261 @@ async function init() {
 function renderTripCards() {
   const bar = document.getElementById('tripsBar');
   bar.innerHTML = trips.map(t => {
-    const rating = t.rating ? '<span class="rating">' + '★'.repeat(t.rating) + '☆'.repeat(5-t.rating) + '</span>'
-                            : '<span class="unreviewed">⚠ Not reviewed</span>';
-    return `<div class="trip-card" data-id="${t.id}" onclick="selectTrip(${t.id})">
-      <div class="name">${t.name || 'Unknown'}</div>
-      <div class="meta">${new Date(t.start).toLocaleDateString('en-GB', {month:'short',year:'numeric'})} · ${t.days}d</div>
+    const rating = t.rating
+      ? '<span class="rating">' + '<span style="color:var(--gold)">★</span>'.repeat(t.rating) + '<span style="color:var(--border)">★</span>'.repeat(5-t.rating) + '</span>'
+      : '<span class="unreviewed">⚠ Not reviewed</span>';
+    const ppl = t.people.length ? `<div class="meta" style="color:#00cc88">${t.family ? '👨‍👩‍👧 ' : '👥 '}${t.people.slice(0,3).join(', ')}</div>` : '';
+    const typeBadge = t.trip_type === 'road trip' ? ' 🚗' : '';
+    const reviewedClass = t.reviewed ? ' reviewed' : '';
+    return `<div class="trip-card${reviewedClass}" data-id="${t.id}" data-people='${JSON.stringify(t.people)}' data-type="${t.trip_type || 'stay'}" onclick="selectTrip(${t.id})">
+      <div class="name">${t.name || 'Unknown'}${typeBadge}</div>
+      <div class="meta">${new Date(t.start).toLocaleDateString('en-GB', {month:'short',year:'numeric'})} · ${t.days}d · ${t.photos} 📷</div>
+      ${ppl}
       ${rating}
     </div>`;
   }).join('');
 }
 
+let _selectingTrip = false;
 function selectTrip(id) {
+  if (_selectingTrip) return; // prevent re-entrant calls
+  _selectingTrip = true;
+
   selectedTrip = trips.find(t => t.id === id);
-  if (!selectedTrip) return;
+  if (!selectedTrip) { _selectingTrip = false; return; }
 
   // Highlight card
   document.querySelectorAll('.trip-card').forEach(c => c.classList.toggle('active', parseInt(c.dataset.id) === id));
 
-  // Pan map
-  map.setView([selectedTrip.lat, selectedTrip.lon], 6);
-  markers[id]?.openPopup();
+  // Pan map — don't change zoom if already zoomed in enough
+  const currentZoom = map.getZoom();
+  map.setView([selectedTrip.lat, selectedTrip.lon], Math.max(currentZoom, 6));
 
-  // Switch to review tab
+  // Switch to review tab and load detail
   switchTab('review');
-  loadReview(id);
+  loadTripDetail(id);
+
+  _selectingTrip = false;
 }
 
-async function loadReview(tripId) {
-  const resp = await fetch(`api/trip/${tripId}/questions`);
-  const data = await resp.json();
+async function loadTripDetail(tripId) {
+  const [detailResp, photosResp] = await Promise.all([
+    fetch(`api/trip/${tripId}/detail`),
+    fetch(`api/trip/${tripId}/photos`)
+  ]);
+  const detail = await detailResp.json();
+  const photos = await photosResp.json();
+
   const container = document.getElementById('reviewContent');
-  const existing = data.existing_review || {};
+  const typIcon = detail.trip_type === 'road trip' ? '🚗' : detail.trip_type === 'day trip' ? '📍' : '🏨';
+  const familyBadge = detail.family ? '<span style="color:var(--accent)">👨‍👩‍👧 Family trip</span>' : '';
 
-  let html = `<h3>Review: ${data.trip.name}</h3>`;
+  // Photo gallery
+  let photoHtml = '';
+  if (photos.length) {
+    photoHtml = `<div style="display:flex;gap:4px;overflow-x:auto;padding:8px 0;flex-shrink:0">
+      ${photos.map(p => `<img src="api/photo/${p.uuid}" loading="lazy" style="height:80px;width:80px;object-fit:cover;border-radius:6px;flex-shrink:0;border:${p.favorite ? '2px solid #ffd700' : '1px solid var(--border)'}" onerror="this.style.display='none'" title="${p.faces.join(', ') || ''} ${p.favorite ? '⭐' : ''}">`).join('')}
+    </div>`;
+  }
 
-  data.questions.forEach(q => {
-    html += `<div class="question">`;
-    html += `<label>${q.text}</label>`;
+  // People
+  const peopleHtml = detail.people.length ? detail.people.map(p => {
+    const count = detail.people_counts?.[p] || 0;
+    return `<span style="display:inline-block;padding:3px 10px;border-radius:14px;font-size:12px;background:rgba(0,204,136,0.12);color:var(--accent);margin:2px">${p} <span style="opacity:0.6">${count}</span></span>`;
+  }).join('') : '<span style="color:var(--dim)">No people detected</span>';
 
-    if (q.type === 'rating') {
-      const val = existing[q.id] || 0;
-      html += `<div class="stars" data-qid="${q.id}">`;
-      for (let i = 1; i <= 5; i++) {
-        html += `<span class="star ${i <= val ? 'filled' : ''}" data-val="${i}" onclick="setRating('${q.id}',${i})">★</span>`;
-      }
-      html += `</div>`;
-    } else if (q.type === 'multi_select') {
-      const selected = existing[q.id] || [];
-      html += `<div class="options" data-qid="${q.id}">`;
-      q.options.forEach(opt => {
-        html += `<span class="opt ${selected.includes(opt) ? 'selected' : ''}" onclick="toggleOpt(this,'${q.id}')">${opt}</span>`;
+  // Stops with mini route map
+  let stopsHtml = '';
+  if (detail.stops?.length > 1) {
+    stopsHtml = `<div style="margin-top:12px">
+      <div style="font-size:12px;font-weight:600;margin-bottom:6px">📌 ${detail.stops.length} stops</div>
+      <div id="miniRouteMap" style="height:180px;border-radius:8px;border:1px solid var(--border);margin-bottom:8px"></div>
+      ${detail.stops.map((s, i) => `<div style="display:flex;align-items:center;gap:8px;padding:4px 0;font-size:12px;cursor:pointer" onclick="map.setView([${s.lat},${s.lon}],12)">
+        <span style="background:var(--accent);color:var(--bg);width:20px;height:20px;border-radius:50%;display:flex;align-items:center;justify-content:center;font-size:10px;font-weight:700;flex-shrink:0">${i+1}</span>
+        <span style="flex:1">${s.name || `${s.lat.toFixed(2)}, ${s.lon.toFixed(2)}`}</span>
+        <span style="color:var(--dim)">${s.photo_count}</span>
+      </div>`).join('')}
+    </div>`;
+  }
+
+  // Daily breakdown sparkline
+  let dailyHtml = '';
+  if (detail.daily_breakdown?.length > 1) {
+    const maxPhotos = Math.max(...detail.daily_breakdown.map(d => d.photos));
+    dailyHtml = `<div style="margin-top:12px">
+      <div style="font-size:12px;font-weight:600;margin-bottom:6px">📊 Daily photos</div>
+      <div style="display:flex;align-items:end;gap:2px;height:40px">
+        ${detail.daily_breakdown.map(d => {
+          const h = Math.max(4, (d.photos / maxPhotos) * 36);
+          const day = new Date(d.date).toLocaleDateString('en-GB', {weekday:'short'});
+          return `<div title="${day}: ${d.photos} photos" style="flex:1;background:var(--accent2);border-radius:2px 2px 0 0;height:${h}px;min-width:4px;opacity:0.7"></div>`;
+        }).join('')}
+      </div>
+    </div>`;
+  }
+
+  // Inline review widgets
+  const review = detail.review || {};
+  const currentRating = review.overall || 0;
+  const currentHighlights = review.highlights || [];
+  const currentReturn = review.would_return || '';
+  const currentNotes = review.notes || '';
+
+  const highlightOptions = [
+    '🏖️ Beach', '🏛️ Culture', '🍽️ Food', '🏔️ Nature',
+    '🎢 Adventure', '👨‍👩‍👧 Family time', '🌆 City', '☀️ Weather'
+  ];
+
+  const returnOptions = ['Definitely', 'Maybe', 'Probably not', 'No way'];
+
+  const starsHtml = `<div class="detail-section">
+    <div class="detail-section-title">Rating</div>
+    <div class="inline-stars" id="inlineStars" data-trip="${tripId}">
+      ${[1,2,3,4,5].map(i => `<span class="inline-star ${i <= currentRating ? 'filled' : ''}" data-val="${i}" onclick="setInlineStar(${tripId},${i})">★</span>`).join('')}
+    </div>
+  </div>`;
+
+  const chipsHtml = `<div class="detail-section">
+    <div class="detail-section-title">Highlights</div>
+    <div class="highlight-chips" id="inlineChips" data-trip="${tripId}">
+      ${highlightOptions.map(h => `<span class="highlight-chip ${currentHighlights.includes(h) ? 'selected' : ''}" onclick="toggleChip(this,${tripId})">${h}</span>`).join('')}
+    </div>
+  </div>`;
+
+  const returnHtml = `<div class="detail-section">
+    <div class="detail-section-title">Would you return?</div>
+    <div class="return-btns" id="inlineReturn" data-trip="${tripId}">
+      ${returnOptions.map(r => `<button class="return-btn ${currentReturn === r ? 'selected' : ''}" onclick="selectReturn(this,${tripId})">${r}</button>`).join('')}
+    </div>
+  </div>`;
+
+  const notesHtml = `<div class="detail-section">
+    <div class="detail-section-title">Notes</div>
+    <textarea class="inline-notes" id="inlineNotes" data-trip="${tripId}" placeholder="Anything you want to remember...">${currentNotes}</textarea>
+  </div>`;
+
+  const tripDate = new Date(detail.start).toLocaleDateString('en-GB', {month:'short', year:'numeric'});
+  const highlightsText = currentHighlights.length ? currentHighlights.join(', ') : 'various activities';
+  const moreLikeHtml = `<div class="detail-section" style="display:flex;align-items:center;gap:10px">
+    <button class="more-like-btn" onclick="findMoreLike('${(detail.name||'').replace(/'/g,"\\'")}','${tripDate}','${highlightsText.replace(/'/g,"\\'")}')">🔍 Find more like this</button>
+    <span class="autosave-indicator" id="autosaveIndicator" style="opacity:0"></span>
+  </div>`;
+
+  container.innerHTML = `
+    <div style="padding:16px">
+      <h3 style="margin-bottom:4px">${typIcon} ${detail.name || 'Unknown'}</h3>
+      <div style="color:var(--dim);font-size:13px;margin-bottom:12px">
+        ${new Date(detail.start).toLocaleDateString('en-GB', {day:'numeric',month:'short',year:'numeric'})} — ${new Date(detail.end).toLocaleDateString('en-GB', {day:'numeric',month:'short',year:'numeric'})}
+        · ${detail.days} days · ${detail.photos} photos${detail.favorites ? ` · ${detail.favorites} ⭐` : ''}
+        ${familyBadge}
+      </div>
+      ${photoHtml}
+      <div style="margin-top:12px">
+        <div style="font-size:12px;font-weight:600;margin-bottom:6px">👥 People</div>
+        ${peopleHtml}
+      </div>
+      ${stopsHtml}
+      ${dailyHtml}
+      <div style="margin-top:16px;padding-top:12px;border-top:1px solid var(--border)">
+        ${starsHtml}
+        ${chipsHtml}
+        ${returnHtml}
+        ${notesHtml}
+        ${moreLikeHtml}
+      </div>
+    </div>
+  `;
+
+  // Debounced autosave for notes
+  const notesEl = document.getElementById('inlineNotes');
+  if (notesEl) {
+    let notesTimer;
+    notesEl.addEventListener('input', () => {
+      clearTimeout(notesTimer);
+      notesTimer = setTimeout(() => autoSaveReview(tripId), 800);
+    });
+    notesEl.addEventListener('blur', () => {
+      clearTimeout(notesTimer);
+      autoSaveReview(tripId);
+    });
+  }
+
+  // Init mini route map if stops exist
+  if (detail.stops?.length > 1) {
+    setTimeout(() => {
+      const mapEl = document.getElementById('miniRouteMap');
+      if (!mapEl) return;
+      const miniMap = L.map(mapEl, { zoomControl: false, attributionControl: false });
+      L.tileLayer('https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png', { maxZoom: 19 }).addTo(miniMap);
+
+      const coords = detail.stops.map(s => [s.lat, s.lon]);
+      // Route line
+      L.polyline(coords, { color: '#00cc88', weight: 3, opacity: 0.8 }).addTo(miniMap);
+      // Numbered markers
+      detail.stops.forEach((s, i) => {
+        L.circleMarker([s.lat, s.lon], {
+          radius: 10, color: '#00cc88', fillColor: '#00cc88', fillOpacity: 1, weight: 0
+        }).bindTooltip(`${i+1}`, { permanent: true, direction: 'center', className: 'stop-number' }).addTo(miniMap);
       });
-      html += `</div>`;
-    } else if (q.type === 'select') {
-      const selected = existing[q.id] || '';
-      html += `<div class="options" data-qid="${q.id}">`;
-      q.options.forEach(opt => {
-        html += `<span class="opt ${selected === opt ? 'selected' : ''}" onclick="selectOne(this,'${q.id}')">${opt}</span>`;
-      });
-      html += `</div>`;
-    } else if (q.type === 'text') {
-      html += `<textarea class="review-text" data-qid="${q.id}" placeholder="Optional notes...">${existing[q.id] || ''}</textarea>`;
-    }
-
-    html += `</div>`;
-  });
-
-  html += `<button class="save-btn" onclick="saveReview(${tripId})">Save Review</button>`;
-  container.innerHTML = html;
+      miniMap.fitBounds(coords, { padding: [20, 20] });
+    }, 100);
+  }
 }
 
-function setRating(qid, val) {
-  const stars = document.querySelector(`.stars[data-qid="${qid}"]`);
-  stars.querySelectorAll('.star').forEach(s => {
+function setInlineStar(tripId, val) {
+  const container = document.getElementById('inlineStars');
+  container.querySelectorAll('.inline-star').forEach(s => {
     s.classList.toggle('filled', parseInt(s.dataset.val) <= val);
   });
-  stars.dataset.value = val;
+  autoSaveReview(tripId);
 }
 
-function toggleOpt(el, qid) {
+function toggleChip(el, tripId) {
   el.classList.toggle('selected');
+  autoSaveReview(tripId);
 }
 
-function selectOne(el, qid) {
-  el.parentElement.querySelectorAll('.opt').forEach(o => o.classList.remove('selected'));
+function selectReturn(el, tripId) {
+  el.parentElement.querySelectorAll('.return-btn').forEach(b => b.classList.remove('selected'));
   el.classList.add('selected');
+  autoSaveReview(tripId);
 }
 
-async function saveReview(tripId) {
+function findMoreLike(name, date, highlights) {
+  switchTab('chat');
+  const msg = `Find me a trip similar to ${name} — we went there in ${date} and enjoyed ${highlights}`;
+  document.getElementById('chatInput').value = msg;
+  sendChat();
+}
+
+async function autoSaveReview(tripId) {
   const review = {};
-  document.querySelectorAll('.stars[data-qid]').forEach(el => {
-    review[el.dataset.qid] = parseInt(el.dataset.value) || 0;
-  });
-  document.querySelectorAll('.options[data-qid]').forEach(el => {
-    const selected = [...el.querySelectorAll('.opt.selected')].map(o => o.textContent);
-    const qid = el.dataset.qid;
-    // Check if multi or single select
-    const isMulti = el.querySelectorAll('.opt.selected').length > 1 || el.closest('.question').querySelector('label').textContent.includes('highlights') || el.closest('.question').querySelector('label').textContent.includes('best for');
-    review[qid] = isMulti ? selected : (selected[0] || '');
-  });
-  document.querySelectorAll('textarea[data-qid]').forEach(el => {
-    if (el.value.trim()) review[el.dataset.qid] = el.value.trim();
-  });
+
+  // Read stars
+  const starsEl = document.getElementById('inlineStars');
+  if (starsEl) {
+    const filled = starsEl.querySelectorAll('.inline-star.filled');
+    review.overall = filled.length;
+  }
+
+  // Read highlight chips
+  const chipsEl = document.getElementById('inlineChips');
+  if (chipsEl) {
+    review.highlights = [...chipsEl.querySelectorAll('.highlight-chip.selected')].map(c => c.textContent);
+  }
+
+  // Read would-return
+  const returnEl = document.getElementById('inlineReturn');
+  if (returnEl) {
+    const sel = returnEl.querySelector('.return-btn.selected');
+    review.would_return = sel ? sel.textContent : '';
+  }
+
+  // Read notes
+  const notesEl = document.getElementById('inlineNotes');
+  if (notesEl && notesEl.value.trim()) {
+    review.notes = notesEl.value.trim();
+  }
 
   await fetch(`api/trip/${tripId}/review`, {
     method: 'POST',
@@ -870,17 +1357,87 @@ async function saveReview(tripId) {
     body: JSON.stringify(review)
   });
 
-  // Update trip state
+  // Update trip state client-side
   const trip = trips.find(t => t.id === tripId);
   if (trip) { trip.reviewed = true; trip.rating = review.overall; }
   document.getElementById('reviewCount').textContent = trips.filter(t => t.reviewed).length;
   renderTripCards();
 
-  // Flash save confirmation
-  const btn = document.querySelector('.save-btn');
-  btn.textContent = '✓ Saved!';
-  btn.style.background = '#00cc88';
-  setTimeout(() => { btn.textContent = 'Save Review'; }, 2000);
+  // Show autosave indicator
+  const indicator = document.getElementById('autosaveIndicator');
+  if (indicator) {
+    indicator.textContent = 'Saved ✓';
+    indicator.style.opacity = '1';
+    setTimeout(() => { indicator.style.opacity = '0'; }, 2000);
+  }
+}
+
+// === MARKDOWN RENDERER ===
+function renderMarkdown(text) {
+  if (!text) return '';
+  // Split into lines for processing
+  const lines = text.split('\n');
+  let html = '';
+  let inUl = false, inOl = false;
+
+  for (let i = 0; i < lines.length; i++) {
+    let line = lines[i];
+
+    // Headings: ## heading
+    if (/^#{1,3}\s+/.test(line)) {
+      if (inUl) { html += '</ul>'; inUl = false; }
+      if (inOl) { html += '</ol>'; inOl = false; }
+      const heading = line.replace(/^#{1,3}\s+/, '');
+      html += `<h4 style="margin:8px 0 4px;color:var(--accent)">${heading}</h4>`;
+      continue;
+    }
+
+    // Unordered list: - item or * item
+    if (/^[\-\*]\s+/.test(line)) {
+      if (inOl) { html += '</ol>'; inOl = false; }
+      if (!inUl) { html += '<ul>'; inUl = true; }
+      let item = line.replace(/^[\-\*]\s+/, '');
+      item = item.replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>');
+      item = item.replace(/\*(.+?)\*/g, '<em>$1</em>');
+      html += `<li>${item}</li>`;
+      continue;
+    }
+
+    // Ordered list: 1. item
+    if (/^\d+\.\s+/.test(line)) {
+      if (inUl) { html += '</ul>'; inUl = false; }
+      if (!inOl) { html += '<ol>'; inOl = true; }
+      let item = line.replace(/^\d+\.\s+/, '');
+      item = item.replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>');
+      item = item.replace(/\*(.+?)\*/g, '<em>$1</em>');
+      html += `<li>${item}</li>`;
+      continue;
+    }
+
+    // Close lists if needed
+    if (inUl) { html += '</ul>'; inUl = false; }
+    if (inOl) { html += '</ol>'; inOl = false; }
+
+    // Empty line = paragraph break
+    if (line.trim() === '') {
+      html += '<br>';
+      continue;
+    }
+
+    // Inline formatting
+    line = line.replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>');
+    line = line.replace(/\*(.+?)\*/g, '<em>$1</em>');
+
+    // Check if next line is also a regular text line (single newline -> <br>)
+    const nextLine = i + 1 < lines.length ? lines[i + 1] : '';
+    const nextIsText = nextLine.trim() !== '' && !/^[\-\*#]/.test(nextLine) && !/^\d+\.\s/.test(nextLine);
+    html += line + (nextIsText ? '<br>' : '');
+  }
+
+  if (inUl) html += '</ul>';
+  if (inOl) html += '</ol>';
+
+  return html;
 }
 
 // === CHAT ===
@@ -895,7 +1452,7 @@ async function sendChat() {
 
   const btn = document.getElementById('sendBtn');
   btn.disabled = true;
-  addChatMessage('ai', '<span class="thinking">Thinking about destinations...</span>', 'thinking-msg');
+  addChatMessage('ai', '<div class="thinking-dots"><span></span><span></span><span></span></div>', 'thinking-msg');
 
   try {
     const resp = await fetch('api/chat', {
@@ -928,7 +1485,12 @@ function addChatMessage(role, content, id) {
   const div = document.createElement('div');
   div.className = `msg ${role}`;
   if (id) div.id = id;
-  div.innerHTML = content;
+  // For AI messages (not thinking indicators), render markdown
+  if (role === 'ai' && !id) {
+    div.innerHTML = renderMarkdown(content);
+  } else {
+    div.innerHTML = content;
+  }
   container.appendChild(div);
   container.scrollTop = container.scrollHeight;
 }
@@ -1028,6 +1590,286 @@ function renderFrequency(data) {
   html += '</div>';
 
   container.innerHTML = html;
+}
+
+// === UTILS ===
+function haversineJS(lat1, lon1, lat2, lon2) {
+  const R = 6371;
+  const dLat = (lat2-lat1) * Math.PI/180;
+  const dLon = (lon2-lon1) * Math.PI/180;
+  const a = Math.sin(dLat/2)**2 + Math.cos(lat1*Math.PI/180)*Math.cos(lat2*Math.PI/180)*Math.sin(dLon/2)**2;
+  return R * 2 * Math.asin(Math.sqrt(a));
+}
+
+// === FILTERS ===
+let activeTypeFilter = 'all';
+let selectedPeople = [];
+let peopleFilterMode = 'any'; // 'any' (OR) or 'all' (AND)
+let hideSoloTrips = false;
+let showOnlyUnreviewed = false;
+let selectedYears = [];
+let routeLayer;
+
+function toggleUnreviewedFilter(btn) {
+  showOnlyUnreviewed = !showOnlyUnreviewed;
+  btn.classList.toggle('active', showOnlyUnreviewed);
+  btn.textContent = showOnlyUnreviewed ? '⚠ Unreviewed only' : '⚠ Unreviewed';
+  applyFilters();
+}
+
+function quickReview() {
+  const unreviewed = trips.filter(t => !t.reviewed);
+  if (!unreviewed.length) {
+    alert('All trips have been reviewed!');
+    return;
+  }
+  // Pick the first unreviewed trip
+  selectTrip(unreviewed[0].id);
+}
+
+function populatePeopleFilter() {
+  const allPeople = {};
+  trips.forEach(t => t.people.forEach(p => { allPeople[p] = (allPeople[p] || 0) + 1; }));
+  const dd = document.getElementById('peopleDropdown');
+  let html = `<div style="display:flex;gap:4px;padding:4px 8px;margin-bottom:4px;border-bottom:1px solid var(--border)">
+    <button onclick="setPeopleMode('any')" id="modeAny" style="flex:1;padding:3px;border-radius:4px;border:1px solid var(--border);font-size:11px;cursor:pointer;background:var(--accent);color:var(--bg)">Any of</button>
+    <button onclick="setPeopleMode('all')" id="modeAll" style="flex:1;padding:3px;border-radius:4px;border:1px solid var(--border);font-size:11px;cursor:pointer;background:var(--surface);color:var(--text)">All of</button>
+    <span style="padding:3px;font-size:11px;color:var(--dim);cursor:pointer" onclick="clearPeopleFilter()">✕</span>
+  </div>`;
+  Object.entries(allPeople)
+    .sort((a,b) => b[1] - a[1])
+    .forEach(([name, count]) => {
+      html += `<label style="display:flex;align-items:center;gap:6px;padding:4px 8px;font-size:12px;cursor:pointer;border-radius:4px;white-space:nowrap" onmouseover="this.style.background='var(--border)'" onmouseout="this.style.background=''">
+        <input type="checkbox" value="${name}" onchange="updatePeopleFilter()" style="accent-color:var(--accent)">
+        ${name} <span style="color:var(--dim)">(${count})</span>
+      </label>`;
+    });
+  dd.innerHTML = html;
+  // Init route layer
+  routeLayer = L.layerGroup().addTo(map);
+
+  // Populate year filter
+  const years = [...new Set(trips.map(t => new Date(t.start).getFullYear()))].sort((a,b) => b-a);
+  const yearDD = document.getElementById('yearDropdown');
+  let yearHtml = '<label style="display:block;padding:4px 8px;font-size:12px;color:var(--dim);cursor:pointer" onclick="clearYearFilter()">Clear all</label>';
+  years.forEach(y => {
+    const count = trips.filter(t => new Date(t.start).getFullYear() === y).length;
+    yearHtml += `<label style="display:flex;align-items:center;gap:6px;padding:3px 8px;font-size:12px;cursor:pointer;border-radius:4px" onmouseover="this.style.background='var(--border)'" onmouseout="this.style.background=''">
+      <input type="checkbox" value="${y}" onchange="updateYearFilter()" style="accent-color:var(--accent)">
+      ${y} <span style="color:var(--dim)">(${count})</span>
+    </label>`;
+  });
+  yearDD.innerHTML = yearHtml;
+}
+
+function toggleYearDropdown() {
+  const dd = document.getElementById('yearDropdown');
+  dd.style.display = dd.style.display === 'none' ? 'block' : 'none';
+}
+document.addEventListener('click', e => {
+  const wrap = document.getElementById('yearFilterWrap');
+  if (wrap && !wrap.contains(e.target)) {
+    document.getElementById('yearDropdown').style.display = 'none';
+  }
+});
+
+function updateYearFilter() {
+  const checks = document.querySelectorAll('#yearDropdown input[type=checkbox]');
+  selectedYears = [...checks].filter(c => c.checked).map(c => parseInt(c.value));
+  const btn = document.getElementById('yearFilterBtn');
+  btn.textContent = selectedYears.length ? `📅 ${selectedYears.join(', ')}` : '📅 Years';
+  btn.classList.toggle('active', selectedYears.length > 0);
+  applyFilters();
+}
+
+function clearYearFilter() {
+  document.querySelectorAll('#yearDropdown input[type=checkbox]').forEach(c => c.checked = false);
+  updateYearFilter();
+}
+
+function togglePeopleDropdown() {
+  const dd = document.getElementById('peopleDropdown');
+  dd.style.display = dd.style.display === 'none' ? 'block' : 'none';
+}
+// Close dropdown when clicking elsewhere
+document.addEventListener('click', e => {
+  const wrap = document.getElementById('peopleFilterWrap');
+  if (wrap && !wrap.contains(e.target)) {
+    document.getElementById('peopleDropdown').style.display = 'none';
+  }
+});
+
+function updatePeopleFilter() {
+  const checks = document.querySelectorAll('#peopleDropdown input[type=checkbox]');
+  selectedPeople = [...checks].filter(c => c.checked).map(c => c.value);
+  const btn = document.getElementById('peopleFilterBtn');
+  btn.textContent = selectedPeople.length ? `👥 ${selectedPeople.length} selected` : '👥 People';
+  btn.classList.toggle('active', selectedPeople.length > 0);
+  applyFilters();
+}
+
+function setPeopleMode(mode) {
+  peopleFilterMode = mode;
+  document.getElementById('modeAny').style.background = mode === 'any' ? 'var(--accent)' : 'var(--surface)';
+  document.getElementById('modeAny').style.color = mode === 'any' ? 'var(--bg)' : 'var(--text)';
+  document.getElementById('modeAll').style.background = mode === 'all' ? 'var(--accent)' : 'var(--surface)';
+  document.getElementById('modeAll').style.color = mode === 'all' ? 'var(--bg)' : 'var(--text)';
+  applyFilters();
+}
+
+function clearPeopleFilter() {
+  document.querySelectorAll('#peopleDropdown input[type=checkbox]').forEach(c => c.checked = false);
+  updatePeopleFilter();
+}
+
+function filterType(type, btn) {
+  activeTypeFilter = type;
+  document.querySelectorAll('.map-controls .map-btn').forEach(b => {
+    if (['All','🏨 Stays','🚗 Road trips','📍 Day trips'].includes(b.textContent)) b.classList.remove('active');
+  });
+  if (btn) btn.classList.add('active');
+  applyFilters();
+}
+
+function toggleSoloFilter(btn) {
+  hideSoloTrips = !hideSoloTrips;
+  btn.classList.toggle('active', hideSoloTrips);
+  btn.textContent = hideSoloTrips ? '👤 Solo hidden' : '👤 Hide solo';
+  applyFilters();
+}
+
+function applyFilters() {
+  const filtered = trips.filter(t => {
+    if (activeTypeFilter !== 'all' && t.trip_type !== activeTypeFilter) return false;
+    if (selectedPeople.length > 0) {
+      if (peopleFilterMode === 'all') {
+        if (!selectedPeople.every(p => t.people.includes(p))) return false;
+      } else {
+        if (!selectedPeople.some(p => t.people.includes(p))) return false;
+      }
+    }
+    if (hideSoloTrips && t.people.length === 0) return false;
+    if (selectedYears.length > 0 && !selectedYears.includes(new Date(t.start).getFullYear())) return false;
+    if (showOnlyUnreviewed && t.reviewed) return false;
+    return true;
+  });
+
+  // Update markers — don't reset zoom
+  markerLayer.clearLayers();
+  if (routeLayer) routeLayer.clearLayers();
+
+  filtered.forEach(t => {
+    const color = t.family ? '#00cc88' : '#0088ff';
+    const radius = Math.max(8, Math.min(16, t.photos / 10));
+    const marker = L.circleMarker([t.lat, t.lon], {
+      radius, color, fillColor: color, fillOpacity: 0.6, weight: 2
+    }).addTo(markerLayer);
+
+    const peopleHtml = t.people.length
+      ? '<br>👥 ' + t.people.map(p => {
+          const count = t.people_counts?.[p];
+          return count ? `${p} <span style="opacity:0.6">(${count})</span>` : p;
+        }).join(', ')
+      : '';
+    const familyBadge = t.family ? ' <span style="color:#00cc88">👨‍👩‍👧 Family</span>' : '';
+    const typeBadge = t.trip_type === 'road trip' ? ' 🚗' : t.trip_type === 'day trip' ? ' 📍' : '';
+    let stopsHtml = '';
+    if (t.stops?.length > 1) {
+      const stopNames = t.stops.filter(s => s.name).map(s => `<span style="opacity:0.8">${s.name}</span> (${s.photo_count})`);
+      stopsHtml = `<br>📌 <b>${t.stops.length} stops:</b><br>${stopNames.join('<br>')}`;
+    }
+    marker.bindPopup(`<b>${t.name || 'Unknown'}${typeBadge}</b>${familyBadge}<br>${new Date(t.start).toLocaleDateString('en-GB', {month:'short',year:'numeric'})} — ${new Date(t.end).toLocaleDateString('en-GB', {month:'short',year:'numeric'})}<br>${t.days} days, ${t.photos} photos${stopsHtml}${peopleHtml}`, {maxWidth: 350});
+    marker.on('click', () => { selectTrip(t.id); });
+    marker.on('mouseover', function() { this.bringToFront(); });
+    markers[t.id] = marker;
+
+    // Show stop dots for trips with multiple stops
+    // Only draw route lines between stops that are within driving distance
+    if (t.stops && t.stops.length > 1 && routeLayer) {
+      // Draw route segments only between nearby stops (< 300km apart)
+      for (let i = 0; i < t.stops.length - 1; i++) {
+        const s1 = t.stops[i], s2 = t.stops[i+1];
+        const dist = haversineJS(s1.lat, s1.lon, s2.lat, s2.lon);
+        if (dist < 300) {
+          L.polyline([[s1.lat, s1.lon], [s2.lat, s2.lon]], {
+            color, weight: 2, opacity: 0.4, dashArray: '6,4'
+          }).addTo(routeLayer);
+        }
+      }
+      // Small dots for each stop
+      t.stops.forEach(s => {
+        L.circleMarker([s.lat, s.lon], {
+          radius: 3, color, fillColor: color, fillOpacity: 0.5, weight: 1
+        }).addTo(routeLayer);
+      });
+    }
+  });
+
+  // Update trip cards
+  const bar = document.getElementById('tripsBar');
+  const filteredIds = new Set(filtered.map(t => t.id));
+  bar.querySelectorAll('.trip-card').forEach(card => {
+    card.style.display = filteredIds.has(parseInt(card.dataset.id)) ? '' : 'none';
+  });
+
+  // Update stats
+  document.getElementById('tripCount').textContent = filtered.length;
+  document.getElementById('countryCount').textContent = [...new Set(filtered.map(t => t.country).filter(Boolean))].length;
+
+  // Update timeline
+  renderTimeline(filtered);
+}
+
+function showStops(trip) {
+  // Highlight stops when clicking a trip
+  if (!trip.stops || trip.stops.length <= 1) return;
+}
+
+function renderTimeline(filteredTrips) {
+  const container = document.getElementById('timelineContent');
+  if (!filteredTrips) filteredTrips = trips;
+
+  const byYear = {};
+  filteredTrips.forEach(t => {
+    const y = new Date(t.start).getFullYear();
+    if (!byYear[y]) byYear[y] = [];
+    byYear[y].push(t);
+  });
+
+  let html = '';
+  const months = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
+
+  Object.keys(byYear).sort((a,b) => b-a).forEach(year => {
+    const yearTrips = byYear[year].sort((a,b) => new Date(a.start) - new Date(b.start));
+    html += `<div style="margin-bottom:20px">
+      <div style="font-size:15px;font-weight:700;color:var(--accent);margin-bottom:8px;position:sticky;top:0;background:var(--bg);padding:4px 0">${year} <span style="font-size:12px;font-weight:400;color:var(--dim)">${yearTrips.length} trips</span></div>`;
+
+    yearTrips.forEach(t => {
+      const month = months[new Date(t.start).getMonth()];
+      const color = t.family ? 'var(--accent)' : 'var(--accent2)';
+      const typIcon = t.trip_type === 'road trip' ? '🚗' : t.trip_type === 'day trip' ? '📍' : '🏨';
+      const peopleChips = t.people.slice(0, 4).map(p =>
+        `<span style="display:inline-block;padding:1px 6px;border-radius:10px;font-size:10px;background:${t.family ? 'rgba(0,204,136,0.15)' : 'rgba(0,136,255,0.15)'};color:${color};margin-right:3px">${p}</span>`
+      ).join('');
+
+      html += `<div style="display:flex;gap:10px;padding:6px 0;border-bottom:1px solid var(--border);cursor:pointer" onclick="selectTrip(${t.id})">
+        <div style="min-width:36px;font-size:12px;color:var(--dim);padding-top:2px">${month}</div>
+        <div style="flex:1;min-width:0">
+          <div style="font-size:13px;font-weight:500;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">
+            ${typIcon} ${t.name || 'Unknown'}
+          </div>
+          <div style="font-size:11px;color:var(--dim);margin-top:2px">
+            ${t.days}d · ${t.photos} photos${t.stops?.length > 1 ? ` · ${t.stops.length} stops` : ''}
+          </div>
+          ${peopleChips ? `<div style="margin-top:3px">${peopleChips}</div>` : ''}
+        </div>
+      </div>`;
+    });
+
+    html += '</div>';
+  });
+
+  container.innerHTML = html || '<p style="color:var(--dim)">No trips match filters</p>';
 }
 
 // === BOOT ===

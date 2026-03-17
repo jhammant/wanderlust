@@ -21,6 +21,7 @@ We NEVER write to this database. Read-only always.
 
 import sqlite3
 import os
+import unicodedata
 from pathlib import Path
 from datetime import datetime, timedelta
 from dataclasses import dataclass, field
@@ -85,6 +86,7 @@ def scan_photos(
     library_path: Optional[str] = None,
     min_year: int = 2000,
     progress_callback=None,
+    name_map: Optional[dict[str, str]] = None,
 ) -> list[PhotoRecord]:
     """
     Scan the Photos database and extract geotagged photos.
@@ -115,6 +117,9 @@ def scan_photos(
           AND ZLONGITUDE IS NOT NULL
           AND ZLATITUDE != 0
           AND ZLONGITUDE != 0
+          AND ZLATITUDE BETWEEN -90 AND 90
+          AND ZLONGITUDE BETWEEN -180 AND 180
+          AND ZLATITUDE != -180
           AND ZTRASHEDSTATE = 0
         ORDER BY ZDATECREATED
         """
@@ -138,7 +143,9 @@ def scan_photos(
             """
             for row in conn.execute(face_query):
                 asset_pk = row["ZASSET"]
-                name = row["ZFULLNAME"]
+                name = unicodedata.normalize("NFC", row["ZFULLNAME"])
+                if name_map and name in name_map:
+                    name = name_map[name]
                 face_map.setdefault(asset_pk, []).append(name)
         except sqlite3.OperationalError:
             # Face tables might not exist or have different schema

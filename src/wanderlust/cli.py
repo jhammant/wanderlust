@@ -27,12 +27,14 @@ def main(ctx, library):
 
 @main.command()
 @click.option("--family", "-f", multiple=True, help="Family member names (for trip detection)")
+@click.option("--name-map", "-n", multiple=True, help="Map photo name to real name (e.g. 'wifey=Anne')")
+@click.option("--born", "-b", multiple=True, help="Birth year for family member (e.g. 'Clara=2016')")
 @click.option("--home-lat", default=51.5615, help="Home latitude")
 @click.option("--home-lon", default=-0.0750, help="Home longitude")
 @click.option("--output", "-o", default=None, help="Save results to JSON file")
-@click.option("--min-days", default=2, help="Minimum trip duration in days")
+@click.option("--min-days", default=1, help="Minimum trip duration in days (1 = include day trips)")
 @click.pass_context
-def scan(ctx, family, home_lat, home_lon, output, min_days):
+def scan(ctx, family, name_map, born, home_lat, home_lon, output, min_days):
     """Scan your Photos library and discover trips."""
     from .scanner import scan_photos, get_library_stats
     from .clusterer import cluster_trips
@@ -59,7 +61,30 @@ def scan(ctx, family, home_lat, home_lon, output, min_days):
     with Progress() as progress:
         task = progress.add_task("Scanning photos...", total=3)
 
-        photos = scan_photos(library, progress_callback=lambda msg: console.print(f"  → {msg}"))
+        # Parse name mappings (e.g. "wifey=Anne")
+        name_mapping = {}
+        for nm in name_map:
+            if "=" in nm:
+                photo_name, real_name = nm.split("=", 1)
+                name_mapping[photo_name.strip()] = real_name.strip()
+
+        # Parse birth years (e.g. "Clara=2016")
+        birth_years = {}
+        for b in born:
+            if "=" in b:
+                name, year = b.split("=", 1)
+                birth_years[name.strip()] = int(year.strip())
+
+        if name_mapping:
+            console.print(f"  → Name mappings: {name_mapping}")
+        if birth_years:
+            console.print(f"  → Birth years: {birth_years}")
+
+        photos = scan_photos(
+            library,
+            progress_callback=lambda msg: console.print(f"  → {msg}"),
+            name_map=name_mapping or None,
+        )
         progress.advance(task)
 
         console.print(f"\n[bold]Clustering into trips...[/bold]")
@@ -68,6 +93,7 @@ def scan(ctx, family, home_lat, home_lon, output, min_days):
             home=(home_lat, home_lon),
             min_trip_days=min_days,
             family_names=list(family) if family else None,
+            birth_years=birth_years or None,
             progress_callback=lambda msg: console.print(f"  → {msg}"),
         )
         progress.advance(task)
@@ -201,7 +227,13 @@ def map(trips_file, output):
 
     trips = _load_trips(trips_file)
 
-    m = folium.Map(location=[30, 0], zoom_start=3, tiles="CartoDB dark_matter")
+    # Auto-center on trip data
+    if trips:
+        avg_lat = sum(t.center_lat for t in trips) / len(trips)
+        avg_lon = sum(t.center_lon for t in trips) / len(trips)
+        m = folium.Map(location=[avg_lat, avg_lon], zoom_start=5, tiles="CartoDB dark_matter")
+    else:
+        m = folium.Map(location=[30, 0], zoom_start=3, tiles="CartoDB dark_matter")
 
     for trip in trips:
         popup = (
@@ -211,7 +243,7 @@ def map(trips_file, output):
         )
         folium.CircleMarker(
             [trip.center_lat, trip.center_lon],
-            radius=max(5, min(20, trip.photo_count / 10)),
+            radius=max(4, min(12, trip.photo_count / 15)),
             popup=popup,
             color="#00ff88" if trip.is_family_trip else "#0088ff",
             fill=True,
@@ -238,7 +270,11 @@ def _save_results(trips, path):
             "photo_count": t.photo_count,
             "favorite_count": t.favorite_count,
             "people": t.people,
+            "people_counts": t.people_counts,
             "is_family_trip": t.is_family_trip,
+            "trip_type": t.trip_type,
+            "spread_km": t.spread_km,
+            "stops": t.stops,
             "season": t.season,
         })
     Path(path).write_text(json.dumps(data, indent=2))
@@ -262,12 +298,46 @@ def _load_trips(path):
             city=d.get("city"),
             place_name=d.get("place_name"),
             people=d.get("people", []),
+            people_counts=d.get("people_counts", {}),
             is_family_trip=d.get("is_family_trip", False),
             photo_count=d.get("photo_count", 0),
             favorite_count=d.get("favorite_count", 0),
+            trip_type=d.get("trip_type", "stay"),
+            spread_km=d.get("spread_km", 0.0),
+            stops=d.get("stops", []),
         )
         trips.append(trip)
     return trips
+
+
+@main.command()
+@click.option("--trips-file", required=True, help="Load trips from JSON file")
+@click.option("--trip-id", type=int, default=None, help="Enrich a specific trip (by ID)")
+@click.option("--provider", type=click.Choice(["openai", "ollama", "manual"]), default="ollama")
+@click.option("--model", default=None, help="Model name")
+def enrich(trips_file, trip_id, provider, model):
+    """Enrich trips with AI-generated narratives from photo metadata."""
+    from .enricher import enrich_trip
+
+    trips = _load_trips(trips_file)
+
+    if trip_id is not None:
+        target_trips = [t for t in trips if t.id == trip_id]
+        if not target_trips:
+            console.print(f"[red]Trip {trip_id} not found[/red]")
+            raise SystemExit(1)
+    else:
+        target_trips = trips
+
+    for trip in target_trips:
+        console.print(f"\n[bold]Enriching: {trip.place_name or 'Unknown'} ({trip.start_date.strftime('%b %Y')})[/bold]")
+        narrative = enrich_trip(
+            trip,
+            provider=provider,
+            model=model,
+            progress_callback=lambda msg: console.print(f"  → {msg}"),
+        )
+        console.print(Panel(narrative, title=f"🌍 {trip.place_name or 'Trip'}", border_style="green"))
 
 
 @main.command()

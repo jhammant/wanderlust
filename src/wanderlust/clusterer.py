@@ -35,11 +35,11 @@ HOME_RADIUS_KM = 30
 # Maximum time gap between photos in the same trip cluster (hours)
 MAX_GAP_HOURS = 48
 
-# Minimum trip duration (days)
-MIN_TRIP_DAYS = 2
+# Minimum trip duration (days) — 1 includes day trips
+MIN_TRIP_DAYS = 1
 
 # DBSCAN: max distance between photos in same location cluster (km)
-LOCATION_EPS_KM = 50
+LOCATION_EPS_KM = 15
 
 
 @dataclass
@@ -56,9 +56,13 @@ class Trip:
     city: Optional[str] = None
     place_name: Optional[str] = None
     people: list[str] = field(default_factory=list)
+    people_counts: dict[str, int] = field(default_factory=dict)
     is_family_trip: bool = False
     photo_count: int = 0
     favorite_count: int = 0
+    trip_type: str = "stay"  # "stay", "road trip", or "day trip"
+    spread_km: float = 0.0  # max distance between photos in the trip
+    stops: list[dict] = field(default_factory=list)  # [{lat, lon, photo_count, label}]
 
     @property
     def duration_days(self) -> int:
@@ -102,6 +106,7 @@ def cluster_trips(
     home_radius_km: float = HOME_RADIUS_KM,
     min_trip_days: int = MIN_TRIP_DAYS,
     family_names: Optional[list[str]] = None,
+    birth_years: Optional[dict[str, int]] = None,
     progress_callback=None,
 ) -> list[Trip]:
     """
@@ -167,10 +172,10 @@ def cluster_trips(
 
         # Use DBSCAN to find location clusters within this time group
         coords = np.array([[p.latitude, p.longitude] for p in group])
-        # Convert eps from km to approximate degrees
-        eps_deg = LOCATION_EPS_KM / 111.0
+        # Convert eps from km to radians (haversine metric operates on radians)
+        eps_rad = LOCATION_EPS_KM / 6371.0
 
-        clustering = DBSCAN(eps=eps_deg, min_samples=2, metric='haversine').fit(
+        clustering = DBSCAN(eps=eps_rad, min_samples=2, metric='haversine').fit(
             np.radians(coords)
         )
 
@@ -186,10 +191,14 @@ def cluster_trips(
         all_trip_photos = group
         all_faces = []
         for p in all_trip_photos:
-            all_faces.extend(p.faces)
+            for face in p.faces:
+                if birth_years and face in birth_years:
+                    if p.timestamp.year < birth_years[face]:
+                        continue
+                all_faces.append(face)
 
         face_counts = Counter(all_faces)
-        people = [name for name, count in face_counts.most_common(10) if count >= 2]
+        people = [name for name, count in face_counts.most_common(15) if count >= 1]
 
         # Determine if family trip
         is_family = False
@@ -197,8 +206,61 @@ def cluster_trips(
             family_present = [n for n in people if n in family_names]
             is_family = len(family_present) >= 1
 
-        center_lat = np.mean([p.latitude for p in all_trip_photos])
-        center_lon = np.mean([p.longitude for p in all_trip_photos])
+        # Use the densest location cluster as center (not the mean of all photos)
+        # This prevents road trip photos from pulling the pin away from the main destination
+        best_label = None
+        best_count = 0
+        for label, photos_in_cluster in label_photos.items():
+            if label == -1:
+                continue  # skip noise
+            if len(photos_in_cluster) > best_count:
+                best_count = len(photos_in_cluster)
+                best_label = label
+
+        if best_label is not None and best_count > 0:
+            primary_photos = label_photos[best_label]
+            center_lat = np.mean([p.latitude for p in primary_photos])
+            center_lon = np.mean([p.longitude for p in primary_photos])
+        else:
+            # Fallback to median (more robust than mean against outliers)
+            center_lat = np.median([p.latitude for p in all_trip_photos])
+            center_lon = np.median([p.longitude for p in all_trip_photos])
+
+        # Calculate geographic spread (max distance between any two sampled photos)
+        spread_km = 0.0
+        sample = all_trip_photos[::max(1, len(all_trip_photos) // 20)]  # sample up to 20 points
+        for i, p1 in enumerate(sample):
+            for p2 in sample[i+1:]:
+                d = haversine_km(p1.latitude, p1.longitude, p2.latitude, p2.longitude)
+                if d > spread_km:
+                    spread_km = d
+
+        # Classify trip type
+        if duration < 2:
+            trip_type = "day trip"
+        elif spread_km > 80:
+            trip_type = "road trip"
+        else:
+            trip_type = "stay"
+
+        # Build stops list from DBSCAN clusters (sorted by time)
+        # Filter out stops near home (airport/transit photos) and tiny clusters
+        stops = []
+        for label, cluster_photos in sorted(label_photos.items(), key=lambda x: x[1][0].timestamp):
+            if label == -1:
+                continue  # skip noise
+            clat = float(np.mean([p.latitude for p in cluster_photos]))
+            clon = float(np.mean([p.longitude for p in cluster_photos]))
+            dist_from_home = haversine_km(home[0], home[1], clat, clon)
+            if dist_from_home < home_radius_km * 2:
+                continue  # skip stops near home (airport/transit)
+            if len(cluster_photos) < 3:
+                continue  # skip tiny clusters (probably transit)
+            stops.append({
+                "lat": clat,
+                "lon": clon,
+                "photo_count": len(cluster_photos),
+            })
 
         trip = Trip(
             id=trip_id,
@@ -209,9 +271,13 @@ def cluster_trips(
             center_lat=float(center_lat),
             center_lon=float(center_lon),
             people=people,
+            people_counts={name: count for name, count in face_counts.most_common(10) if count >= 2},
             is_family_trip=is_family,
             photo_count=len(all_trip_photos),
             favorite_count=sum(1 for p in all_trip_photos if p.is_favorite),
+            trip_type=trip_type,
+            spread_km=round(spread_km, 1),
+            stops=stops,
         )
         trips.append(trip)
         trip_id += 1
