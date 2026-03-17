@@ -276,6 +276,27 @@ def api_trip_questions(trip_id):
     })
 
 
+@app.route("/api/photo/<uuid>/open")
+def api_photo_open(uuid):
+    """Open a photo in Apple Photos app."""
+    import subprocess
+    # Ensure Photos is running
+    subprocess.Popen(['open', '-a', 'Photos'], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    import time
+    time.sleep(1)
+    # Spotlight the photo
+    proc = subprocess.Popen([
+        'osascript', '-e',
+        f'tell application "Photos" to spotlight media item id "{uuid}/L0/001"'
+    ], stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    try:
+        proc.wait(timeout=10)
+        return jsonify({"ok": True})
+    except subprocess.TimeoutExpired:
+        proc.kill()
+        return jsonify({"ok": False, "error": "timeout"}), 504
+
+
 @app.route("/api/trip/<int:trip_id>/review", methods=["POST"])
 def api_save_review(trip_id):
     data = request.json
@@ -1490,7 +1511,7 @@ async function loadTripDetail(tripId) {
   let photoHtml = '';
   if (photos.length) {
     photoHtml = `<div style="display:flex;gap:4px;overflow-x:auto;padding:8px 0;flex-shrink:0">
-      ${photos.map(p => `<img src="api/photo/${p.uuid}" loading="lazy" style="height:80px;width:80px;object-fit:cover;border-radius:6px;flex-shrink:0;border:${p.favorite ? '2px solid #ffd700' : '1px solid var(--border)'}" onerror="this.style.display='none'" title="${p.faces.join(', ') || ''} ${p.favorite ? '⭐' : ''}">`).join('')}
+      ${photos.map(p => `<img src="api/photo/${p.uuid}" loading="lazy" onclick="openInPhotos('${p.uuid}')" style="height:80px;width:80px;object-fit:cover;border-radius:6px;flex-shrink:0;cursor:pointer;border:${p.favorite ? '2px solid #ffd700' : '1px solid var(--border)'};transition:transform 0.15s" onmouseover="this.style.transform='scale(1.1)'" onmouseout="this.style.transform=''" onerror="this.style.display='none'" title="Click to open in Photos">`).join('')}
     </div>`;
   }
 
@@ -1935,6 +1956,13 @@ function renderFrequency(data) {
 }
 
 // === UTILS ===
+async function openInPhotos(uuid) {
+  try {
+    const resp = await fetch(`api/photo/${uuid}/open`);
+    if (!resp.ok) console.warn('Could not open in Photos');
+  } catch(e) { console.warn('Photos open failed:', e); }
+}
+
 function haversineJS(lat1, lon1, lat2, lon2) {
   const R = 6371;
   const dLat = (lat2-lat1) * Math.PI/180;
