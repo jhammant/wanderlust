@@ -214,6 +214,17 @@ def build_chat_context():
         lines.append(f"- Range: {p.avg_distance_km:.0f}km avg, {p.max_distance_km:.0f}km max")
         lines.append(f"- Countries: {', '.join(p.countries_visited)}")
 
+    # What the family enjoys most — aggregate highlights sorted by frequency
+    all_review_highlights = []
+    for review in STATE["reviews"].values():
+        all_review_highlights.extend(review.get("highlights", []))
+    if all_review_highlights:
+        from collections import Counter
+        highlight_counts = Counter(all_review_highlights).most_common()
+        lines.append("\n## What the family enjoys most")
+        for item, count in highlight_counts:
+            lines.append(f"- {item} (mentioned in {count} trip{'s' if count > 1 else ''})")
+
     # Avoid list
     if AVOID_PLACES_FILE.exists():
         try:
@@ -503,8 +514,14 @@ def api_chat():
     data = request.json
     user_message = data.get("message", "")
     history = data.get("history", [])
+    current_plan = data.get("plan")
 
     context = build_chat_context()
+
+    # Include current plan context if provided
+    plan_context = ""
+    if current_plan:
+        plan_context = f"\n\nCurrent trip plan being discussed:\n{json.dumps(current_plan, indent=2)}\n"
 
     # Build the system prompt
     system = f"""You are Wanderlust, a personal travel advisor. You have access to the user's
@@ -524,6 +541,7 @@ RULES:
 8. When suggesting destinations, always include: distance from London, best season, which past trip it's similar to, and why it works for Clara (10), Zoe (7), Ethan (4).
 
 {context}
+{plan_context}
 """
 
     # For now, return the prompt for the LLM to process
@@ -800,6 +818,7 @@ CRITICAL RULES:
 - Reference their travel DNA from the profile when choosing destinations
 - Reference review highlights for trips in {country} when explaining choices
 - Give realistic driving times accounting for breaks with young children
+- Include rough cost estimates in GBP for accommodation (family of 5) and activities at each stop
 - Return ONLY valid JSON — no markdown fences, no explanation text before or after
 - The JSON must match this exact schema:
 
@@ -820,7 +839,10 @@ CRITICAL RULES:
       "accommodation_type": "string — eg Gite, Airbnb, Hotel, Camping",
       "drive_from_previous_km": number,
       "drive_from_previous_hours": number,
-      "similar_to_past": "string — reference a past trip if relevant"
+      "similar_to_past": "string — reference a past trip if relevant",
+      "est_accommodation_per_night": number,
+      "est_activities_cost": number,
+      "booking_search": "string — search query for Booking.com eg 'Bayeux family apartment July 2026'"
     }}
   ],
   "exclusion_reasoning": "string — explain what was avoided and why"
@@ -971,6 +993,321 @@ def api_calendar():
         "past_trips": past_trips,
         "school_holidays": school_holidays,
     })
+
+
+# === DRIVING ROUTE ENDPOINT ===
+
+
+@app.route("/api/roadtrip/route", methods=["POST"])
+def api_roadtrip_route():
+    """Get actual driving routes between consecutive stops via OSRM."""
+    import requests
+    import certifi
+
+    data = request.json
+    stops = data.get("stops", [])
+
+    if len(stops) < 2:
+        return jsonify({"error": "Need at least 2 stops"}), 400
+
+    segments = []
+    total_km = 0
+    total_hours = 0
+
+    for i in range(len(stops) - 1):
+        s1 = stops[i]
+        s2 = stops[i + 1]
+        lon1, lat1 = s1["lon"], s1["lat"]
+        lon2, lat2 = s2["lon"], s2["lat"]
+
+        try:
+            url = (
+                f"http://router.project-osrm.org/route/v1/driving/"
+                f"{lon1},{lat1};{lon2},{lat2}?overview=full&geometries=geojson"
+            )
+            resp = requests.get(url, timeout=15, verify=certifi.where())
+            resp.raise_for_status()
+            route_data = resp.json()
+
+            if route_data.get("code") == "Ok" and route_data.get("routes"):
+                route = route_data["routes"][0]
+                distance_km = round(route["distance"] / 1000, 1)
+                duration_hours = round(route["duration"] / 3600, 2)
+                geometry = route["geometry"]["coordinates"]
+            else:
+                # Fallback: straight line
+                distance_km = round(haversine_km(lat1, lon1, lat2, lon2), 1)
+                duration_hours = round(distance_km / 80, 2)  # Rough estimate at 80km/h
+                geometry = [[lon1, lat1], [lon2, lat2]]
+        except Exception:
+            # Fallback: straight line if OSRM is down
+            distance_km = round(haversine_km(lat1, lon1, lat2, lon2), 1)
+            duration_hours = round(distance_km / 80, 2)
+            geometry = [[lon1, lat1], [lon2, lat2]]
+
+        segment = {
+            "from": s1.get("name", f"stop{i + 1}"),
+            "to": s2.get("name", f"stop{i + 2}"),
+            "distance_km": distance_km,
+            "duration_hours": duration_hours,
+            "geometry": geometry,
+        }
+        segments.append(segment)
+        total_km += distance_km
+        total_hours += duration_hours
+
+    return jsonify({
+        "segments": segments,
+        "total_km": round(total_km, 1),
+        "total_hours": round(total_hours, 2),
+    })
+
+
+# === WEATHER ENDPOINT ===
+
+
+@app.route("/api/weather", methods=["POST"])
+def api_weather():
+    """Get historical weather averages via Open-Meteo for given locations and month."""
+    import requests
+    import certifi
+
+    data = request.json
+    locations = data.get("locations", [])
+    month = data.get("month", 7)
+
+    results = []
+    for loc in locations:
+        lat = loc.get("lat")
+        lon = loc.get("lon")
+        name = loc.get("name", "Unknown")
+        month_str = f"{month:02d}"
+
+        avg_temp = None
+        avg_precip = None
+
+        # Try climate API first
+        try:
+            url = (
+                f"https://climate-api.open-meteo.com/v1/climate?"
+                f"latitude={lat}&longitude={lon}"
+                f"&start_date=2020-{month_str}-01&end_date=2024-{month_str}-28"
+                f"&daily=temperature_2m_mean,precipitation_sum"
+                f"&models=EC_Earth3P_HR"
+            )
+            resp = requests.get(url, timeout=15, verify=certifi.where())
+            resp.raise_for_status()
+            weather_data = resp.json()
+
+            daily = weather_data.get("daily", {})
+            temps = [t for t in (daily.get("temperature_2m_mean") or []) if t is not None]
+            precips = [p for p in (daily.get("precipitation_sum") or []) if p is not None]
+
+            if temps:
+                avg_temp = round(sum(temps) / len(temps), 1)
+            if precips:
+                avg_precip = round(sum(precips) / len(precips), 1)
+        except Exception:
+            pass
+
+        # Fallback to archive API if climate API failed
+        if avg_temp is None:
+            try:
+                url = (
+                    f"https://archive-api.open-meteo.com/v1/archive?"
+                    f"latitude={lat}&longitude={lon}"
+                    f"&start_date=2023-{month_str}-01&end_date=2023-{month_str}-28"
+                    f"&daily=temperature_2m_mean,precipitation_sum"
+                )
+                resp = requests.get(url, timeout=15, verify=certifi.where())
+                resp.raise_for_status()
+                weather_data = resp.json()
+
+                daily = weather_data.get("daily", {})
+                temps = [t for t in (daily.get("temperature_2m_mean") or []) if t is not None]
+                precips = [p for p in (daily.get("precipitation_sum") or []) if p is not None]
+
+                if temps:
+                    avg_temp = round(sum(temps) / len(temps), 1)
+                if precips:
+                    avg_precip = round(sum(precips) / len(precips), 1)
+            except Exception:
+                pass
+
+        # Generate description
+        if avg_temp is not None:
+            if avg_temp >= 25:
+                temp_desc = "Hot"
+            elif avg_temp >= 18:
+                temp_desc = "Warm"
+            elif avg_temp >= 10:
+                temp_desc = "Mild"
+            else:
+                temp_desc = "Cool"
+
+            if avg_precip is not None and avg_precip > 5:
+                precip_desc = "and rainy"
+            elif avg_precip is not None and avg_precip > 2:
+                precip_desc = "with some rain"
+            else:
+                precip_desc = "and mostly dry"
+
+            description = f"{temp_desc} {precip_desc}"
+        else:
+            description = "Weather data unavailable"
+
+        results.append({
+            "name": name,
+            "avg_temp_c": avg_temp,
+            "avg_precip_mm": avg_precip,
+            "description": description,
+        })
+
+    return jsonify({"locations": results})
+
+
+# === ICS EXPORT ENDPOINT ===
+
+
+@app.route("/api/export/ics/<plan_id>")
+def api_export_ics(plan_id):
+    """Export a saved plan as an iCalendar (.ics) file."""
+    from flask import Response
+    from datetime import timedelta
+
+    if not PLANNED_TRIPS_FILE.exists():
+        return jsonify({"error": "No plans found"}), 404
+
+    try:
+        plans = json.loads(PLANNED_TRIPS_FILE.read_text())
+    except (json.JSONDecodeError, TypeError):
+        return jsonify({"error": "Failed to read plans"}), 500
+
+    plan = next((p for p in plans if p.get("id") == plan_id), None)
+    if not plan:
+        return jsonify({"error": "Plan not found"}), 404
+
+    # Parse start date from the plan
+    start_date_str = plan.get("start_date", "")
+    try:
+        base_date = datetime.strptime(start_date_str, "%Y-%m-%d")
+    except (ValueError, TypeError):
+        # Try to infer from created date or default
+        base_date = datetime.now()
+
+    # Build ICS content
+    ics_lines = [
+        "BEGIN:VCALENDAR",
+        "VERSION:2.0",
+        "PRODID:-//Wanderlust//Trip Planner//EN",
+    ]
+
+    stops = plan.get("stops", [])
+    current_day = 0
+
+    for stop in stops:
+        day_offset = stop.get("day", current_day + 1) - 1
+        days_here = stop.get("days_here", 1)
+        stop_name = stop.get("name", "Unknown")
+
+        event_start = base_date + timedelta(days=day_offset)
+        event_end = base_date + timedelta(days=day_offset + days_here)
+
+        # Build description
+        desc_parts = []
+        activities = stop.get("activities", [])
+        if activities:
+            desc_parts.append(f"Activities: {', '.join(activities)}")
+        accommodation = stop.get("accommodation_type", "")
+        if accommodation:
+            desc_parts.append(f"Accommodation: {accommodation}")
+        drive_hours = stop.get("drive_from_previous_hours")
+        drive_km = stop.get("drive_from_previous_km")
+        if drive_hours:
+            desc_parts.append(f"Drive: {drive_hours}h ({drive_km}km) from previous stop")
+        why_special = stop.get("why_special", "")
+        if why_special:
+            desc_parts.append(why_special)
+
+        description = "\\n".join(desc_parts)
+        # Escape special ICS characters
+        description = description.replace(",", "\\,").replace(";", "\\;")
+        summary = f"\U0001f5fa\ufe0f {stop_name}"
+
+        ics_lines.extend([
+            "BEGIN:VEVENT",
+            f"DTSTART;VALUE=DATE:{event_start.strftime('%Y%m%d')}",
+            f"DTEND;VALUE=DATE:{event_end.strftime('%Y%m%d')}",
+            f"SUMMARY:{summary}",
+            f"DESCRIPTION:{description}",
+            f"LOCATION:{stop_name}",
+            "END:VEVENT",
+        ])
+
+        current_day = day_offset + days_here
+
+    ics_lines.append("END:VCALENDAR")
+    ics_content = "\r\n".join(ics_lines) + "\r\n"
+
+    return Response(
+        ics_content,
+        mimetype="text/calendar",
+        headers={
+            "Content-Disposition": 'attachment; filename="trip-plan.ics"',
+        },
+    )
+
+
+# === REFINE PLAN ENDPOINT ===
+
+
+@app.route("/api/roadtrip/refine", methods=["POST"])
+def api_roadtrip_refine():
+    """Refine an existing road trip plan based on user instructions."""
+    data = request.json
+    plan = data.get("plan", {})
+    instruction = data.get("instruction", "")
+
+    if not plan or not instruction:
+        return jsonify({"error": "Both 'plan' and 'instruction' are required"}), 400
+
+    system_prompt = f"""You are Wanderlust Road Trip Planner. The user has an existing road trip plan and wants to modify it.
+
+CURRENT PLAN:
+{json.dumps(plan, indent=2)}
+
+RULES:
+- Modify the plan according to the user's instruction
+- Keep the same JSON schema as the original plan
+- Preserve fields that aren't affected by the change
+- Recalculate driving distances/times if stops change
+- Keep daily driving to 4-5 hours MAX (family with young kids)
+- Return ONLY valid JSON — no markdown fences, no explanation text before or after
+- The JSON must include all original fields: title, summary, why_these_places, total_driving_km, stops array, exclusion_reasoning
+- Each stop must include: day, days_here, name, lat, lon, activities, why_special, accommodation_type, drive_from_previous_km, drive_from_previous_hours
+"""
+
+    messages = [
+        {"role": "system", "content": system_prompt},
+        {"role": "user", "content": instruction},
+    ]
+
+    response_text = _get_ai_response(messages)
+
+    # Try to parse JSON response
+    try:
+        result = json.loads(response_text)
+    except json.JSONDecodeError:
+        match = re.search(r'\{.*\}', response_text, re.DOTALL)
+        if match:
+            try:
+                result = json.loads(match.group())
+            except json.JSONDecodeError:
+                return jsonify({"error": "Failed to parse AI response", "raw": response_text}), 500
+        else:
+            return jsonify({"error": "No JSON found in AI response", "raw": response_text}), 500
+
+    return jsonify(result)
 
 
 # === HTML TEMPLATE ===
@@ -1231,6 +1568,40 @@ INDEX_HTML = r"""
   .saved-plan:hover { border-color: var(--accent); }
   .saved-plan h4 { font-size: 13px; margin: 0 0 2px; }
   .saved-plan .meta { font-size: 11px; color: var(--dim); }
+
+  /* Weather badge */
+  .weather-badge { display: inline-block; padding: 2px 8px; border-radius: 12px; font-size: 11px;
+    background: rgba(255,255,255,0.06); border: 1px solid var(--border); margin-left: 4px; white-space: nowrap; }
+  .weather-badge.hot { background: rgba(255,100,0,0.12); border-color: rgba(255,100,0,0.3); }
+  .weather-badge.warm { background: rgba(255,200,0,0.12); border-color: rgba(255,200,0,0.3); }
+  .weather-badge.mild { background: rgba(0,200,136,0.12); border-color: rgba(0,200,136,0.3); }
+  .weather-badge.cool { background: rgba(0,136,255,0.12); border-color: rgba(0,136,255,0.3); }
+  .weather-badge.cold { background: rgba(100,100,255,0.12); border-color: rgba(100,100,255,0.3); }
+
+  /* Cost estimate */
+  .cost-estimate { font-size: 11px; color: var(--dim); text-align: right; margin-top: 4px; }
+
+  /* Accommodation links */
+  .accom-links { display: flex; gap: 4px; margin-top: 6px; flex-wrap: wrap; }
+  .accom-link { display: inline-block; padding: 3px 8px; border-radius: 6px; font-size: 11px;
+    text-decoration: none; border: 1px solid var(--border); color: var(--text); transition: all 0.2s; cursor: pointer; }
+  .accom-link:hover { border-color: var(--accent); color: var(--accent); }
+
+  /* Export buttons */
+  .export-buttons { display: flex; gap: 8px; flex-wrap: wrap; padding: 12px 0; }
+  .export-btn { padding: 6px 14px; border-radius: 8px; font-size: 12px; border: 1px solid var(--border);
+    background: var(--surface); color: var(--text); cursor: pointer; transition: all 0.2s; }
+  .export-btn:hover { border-color: var(--accent); color: var(--accent); }
+
+  /* Plan refine */
+  .plan-refine { display: flex; gap: 8px; padding: 12px; border-top: 1px solid var(--border); }
+  .plan-refine input { flex: 1; background: var(--surface); border: 1px solid var(--border); border-radius: 8px; padding: 8px 12px; color: var(--text); font-size: 13px; outline: none; }
+  .plan-refine input:focus { border-color: var(--accent); }
+  .plan-refine button { background: var(--accent); color: var(--bg); border: none; border-radius: 8px; padding: 8px 16px; font-weight: 600; cursor: pointer; }
+
+  /* Distance label on map */
+  .distance-label { background: none !important; border: none !important; box-shadow: none !important;
+    color: var(--dim) !important; font-size: 10px !important; font-weight: 600 !important; padding: 0 !important; white-space: nowrap; }
 </style>
 </head>
 <body>
@@ -2366,33 +2737,103 @@ function renderPlanLoading(country) {
 
 function renderPlanResult(plan) {
   plannerState = 'result';
+  currentPlan = plan;
   const stops = plan.stops || [];
 
+  // Calculate costs
+  const totalAccom = stops.reduce((sum, s) => sum + ((s.est_accommodation_per_night || 0) * (s.days_here || 1)), 0);
+  const totalActivities = stops.reduce((sum, s) => sum + (s.est_activities_cost || 0), 0);
+  const totalDrivingKm = plan.total_driving_km || stops.reduce((sum, s) => sum + (s.drive_from_previous_km || 0), 0);
+  const fuelCost = Math.round(totalDrivingKm * 0.15);
+  const totalCost = totalAccom + totalActivities + fuelCost;
+
   let stopsHtml = '<div style="padding:16px 16px 0">';
-  stopsHtml += `<h3 style="margin-bottom:4px">🗺️ ${plan.title || plan.country + ' Road Trip'}</h3>`;
-  stopsHtml += `<div style="font-size:12px;color:var(--dim);margin-bottom:16px">${plan.summary || ''}</div>`;
+
+  // Enhanced header card
+  stopsHtml += `<div style="background:var(--surface);border-radius:var(--radius);padding:16px;margin-bottom:16px;border:1px solid var(--border)">
+    <h3 style="margin:0 0 8px">${plan.title || plan.country + ' Road Trip'}</h3>
+    <p style="color:var(--dim);font-size:13px;margin:0 0 8px">${plan.summary || ''}</p>
+    <div style="display:flex;gap:16px;font-size:12px;color:var(--dim)">
+      <span>📍 ${stops.length} stops</span>
+      <span>🚗 ${totalDrivingKm}km total</span>
+      <span>💰 ~£${totalCost.toLocaleString()} estimated</span>
+    </div>
+    ${plan.exclusion_reasoning ? `<p style="font-size:12px;color:var(--accent);margin:8px 0 0;font-style:italic">${plan.exclusion_reasoning}</p>` : ''}
+  </div>`;
+
+  // Cost summary
+  if (totalCost > 0) {
+    stopsHtml += `<div style="background:rgba(0,204,136,0.06);border:1px solid rgba(0,204,136,0.2);border-radius:8px;padding:10px;margin-bottom:16px;font-size:12px">
+      <div style="font-weight:600;margin-bottom:4px">💰 Estimated total: ~£${totalCost.toLocaleString()}</div>
+      <div style="color:var(--dim)">Accommodation: ~£${totalAccom.toLocaleString()} · Activities: ~£${totalActivities.toLocaleString()} · Fuel: ~£${fuelCost.toLocaleString()}</div>
+    </div>`;
+  }
 
   stops.forEach((stop, i) => {
-    const driveInfo = i > 0 && stop.drive_time ? `<div class="drive-info">🚗 ${stop.drive_time} from ${stops[i-1].name}</div>` : '';
+    const driveInfo = i > 0 && (stop.drive_from_previous_hours || stop.drive_time)
+      ? `<div class="drive-info">🚗 ${stop.drive_from_previous_hours ? stop.drive_from_previous_hours + 'h' : stop.drive_time}${stop.drive_from_previous_km ? ' (' + stop.drive_from_previous_km + 'km)' : ''} from ${stops[i-1].name}</div>`
+      : '';
     const activities = stop.activities ? `<div class="activities">${stop.activities.map(a => `• ${a}`).join('<br>')}</div>` : '';
-    const why = stop.why ? `<div class="why">"${stop.why}"</div>` : '';
-    const similar = stop.similar_to ? `<div class="similar">Similar to your trip to ${stop.similar_to}</div>` : '';
+    const whyField = stop.why_special || stop.why || '';
+    const why = whyField ? `<div class="why">"${whyField}"</div>` : '';
+    const similarField = stop.similar_to_past || stop.similar_to || '';
+    const similar = similarField ? `<div class="similar">Similar to your trip to ${similarField}</div>` : '';
+
+    // Cost estimate per stop
+    const accomPerNight = stop.est_accommodation_per_night || 0;
+    const activitiesCost = stop.est_activities_cost || 0;
+    let costHtml = '';
+    if (accomPerNight || activitiesCost) {
+      const parts = [];
+      if (accomPerNight) parts.push(`~£${accomPerNight}/night`);
+      if (activitiesCost) parts.push(`~£${activitiesCost} activities`);
+      costHtml = `<div class="cost-estimate">${parts.join(' · ')}</div>`;
+    }
+
+    // Accommodation links
+    let accomHtml = '';
+    if (plan.start_date && stop.day !== undefined) {
+      const startDate = new Date(plan.start_date);
+      const checkin = new Date(startDate);
+      checkin.setDate(checkin.getDate() + (stop.day || 1) - 1);
+      const checkout = new Date(checkin);
+      checkout.setDate(checkout.getDate() + (stop.days_here || 1));
+      const checkinStr = checkin.toISOString().split('T')[0];
+      const checkoutStr = checkout.toISOString().split('T')[0];
+      const stopCountry = plan.country || '';
+      const bookingUrl = `https://www.booking.com/searchresults.html?ss=${encodeURIComponent(stop.name + ' ' + stopCountry)}&checkin=${checkinStr}&checkout=${checkoutStr}&group_adults=2&group_children=3&age=10&age=7&age=4`;
+      const airbnbUrl = `https://www.airbnb.co.uk/s/${encodeURIComponent(stop.name)}/homes?checkin=${checkinStr}&checkout=${checkoutStr}&adults=2&children=3`;
+      accomHtml = `<div class="accom-links">
+        <a class="accom-link" href="${bookingUrl}" target="_blank" rel="noopener">🏨 Booking.com</a>
+        <a class="accom-link" href="${airbnbUrl}" target="_blank" rel="noopener">🏠 Airbnb</a>
+      </div>`;
+    }
+
     const actions = `<div class="stop-actions">
       <button onclick="map.setView([${stop.lat},${stop.lon}],12)">📍 Show</button>
       <button onclick="window.open('https://www.google.com/maps/search/?api=1&query=${stop.lat},${stop.lon}','_blank')">🗺️ Google Maps</button>
     </div>`;
 
-    stopsHtml += `<div class="route-stop" data-day="${i + 1}">
-      <h4>${stop.name}</h4>
+    stopsHtml += `<div class="route-stop" data-day="${i + 1}" id="route-stop-${i}">
+      <h4>${stop.name} <span style="font-size:11px;font-weight:400;color:var(--dim)">${stop.days_here ? stop.days_here + ' nights' : ''}</span></h4>
       ${driveInfo}
       ${activities}
       ${why}
       ${similar}
+      ${costHtml}
+      ${accomHtml}
       ${actions}
     </div>`;
   });
 
-  stopsHtml += `<div style="display:flex;gap:8px;margin-top:20px;padding-bottom:16px">
+  // Export buttons
+  stopsHtml += `<div class="export-buttons">
+    <button class="export-btn" onclick="exportCalendar()">📅 Add to Calendar</button>
+    <button class="export-btn" onclick="copyItinerary()">📋 Copy itinerary</button>
+    <button class="export-btn" onclick="shareItinerary()">📤 Share</button>
+  </div>`;
+
+  stopsHtml += `<div style="display:flex;gap:8px;margin-top:12px;padding-bottom:16px">
     <button class="generate-btn" style="flex:1" onclick="savePlan()">💾 Save plan</button>
     <button class="generate-btn" style="flex:1;background:var(--accent2)" onclick="generateRoadTrip()">🔄 Regenerate</button>
   </div>`;
@@ -2404,11 +2845,185 @@ function renderPlanResult(plan) {
   </div>`;
   stopsHtml += '</div>';
 
+  // Plan refinement input
+  stopsHtml += `<div class="plan-refine">
+    <input placeholder="Refine: 'add a water park stop' or 'swap Bayeux for somewhere coastal'" id="refineInput" onkeydown="if(event.key==='Enter')refinePlan()">
+    <button onclick="refinePlan()">Refine</button>
+  </div>`;
+
   document.getElementById('planContent').innerHTML = stopsHtml;
 
   if (stops.length) {
     drawPlannedRoute(stops);
     if (plan.country) drawExclusionZones(plan.country);
+  }
+
+  // Fetch weather for stops
+  fetchWeatherForPlan(plan);
+}
+
+async function fetchWeatherForPlan(plan) {
+  if (!plan.stops || !plan.start_date) return;
+  const month = new Date(plan.start_date).getMonth() + 1;
+  const locations = plan.stops.map(s => ({ name: s.name, lat: s.lat, lon: s.lon }));
+  try {
+    const resp = await fetch('api/weather', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({ locations, month })
+    });
+    if (!resp.ok) return;
+    const weatherData = await resp.json();
+    if (!weatherData || !Array.isArray(weatherData)) return;
+
+    weatherData.forEach((w, i) => {
+      const stopEl = document.getElementById(`route-stop-${i}`);
+      if (!stopEl || !w) return;
+      const temp = w.avg_temp_c !== undefined ? w.avg_temp_c : null;
+      const rain = w.avg_rain_mm !== undefined ? w.avg_rain_mm : null;
+      if (temp === null && rain === null) return;
+
+      let icon = '🌤️';
+      let cls = 'mild';
+      if (temp !== null) {
+        if (temp >= 30) { icon = '🔥'; cls = 'hot'; }
+        else if (temp >= 22) { icon = '☀️'; cls = 'warm'; }
+        else if (temp >= 15) { icon = '🌤️'; cls = 'mild'; }
+        else if (temp >= 5) { icon = '🌥️'; cls = 'cool'; }
+        else { icon = '❄️'; cls = 'cold'; }
+      }
+      if (rain !== null && rain > 100) { icon = '🌧️'; }
+
+      const parts = [];
+      if (temp !== null) parts.push(`${Math.round(temp)}°C`);
+      if (rain !== null) parts.push(`${Math.round(rain)}mm rain`);
+
+      const badge = document.createElement('span');
+      badge.className = `weather-badge ${cls}`;
+      badge.innerHTML = `${icon} ${parts.join(' · ')}`;
+
+      const h4 = stopEl.querySelector('h4');
+      if (h4) h4.appendChild(badge);
+    });
+  } catch(e) {
+    console.warn('Weather fetch failed:', e);
+  }
+}
+
+async function refinePlan() {
+  const input = document.getElementById('refineInput');
+  if (!input) return;
+  const instruction = input.value.trim();
+  if (!instruction || !currentPlan) return;
+
+  input.value = '';
+  const planContent = document.getElementById('planContent');
+  const prevHtml = planContent.innerHTML;
+  planContent.innerHTML = `
+    <div class="plan-loading">
+      <div class="pulse" style="font-size:48px;margin-bottom:16px">🔄</div>
+      <div style="font-size:16px;font-weight:600;margin-bottom:8px">Refining your plan...</div>
+      <div style="font-size:12px;color:var(--dim)">"${instruction}"</div>
+    </div>
+  `;
+
+  try {
+    const resp = await fetch('api/roadtrip/refine', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({ plan: currentPlan, instruction })
+    });
+    if (!resp.ok) throw new Error('Refine failed');
+    const newPlan = await resp.json();
+    currentPlan = newPlan;
+    renderPlanResult(newPlan);
+  } catch(e) {
+    console.warn('Refine failed:', e);
+    planContent.innerHTML = prevHtml;
+  }
+}
+
+async function exportCalendar() {
+  if (!currentPlan) return;
+  try {
+    // Save plan first to get an ID
+    const saveResp = await fetch('api/roadtrip/save', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify(currentPlan)
+    });
+    if (!saveResp.ok) throw new Error('Save failed');
+    const saveData = await saveResp.json();
+    const planId = saveData.id;
+
+    // Download ICS
+    window.open(`api/export/ics/${planId}`, '_blank');
+  } catch(e) {
+    alert('Failed to export calendar. Try saving the plan first.');
+  }
+}
+
+function buildItineraryText() {
+  if (!currentPlan) return '';
+  const plan = currentPlan;
+  const stops = plan.stops || [];
+  let text = `🗺️ ${plan.title || 'Road Trip'}\n`;
+  if (plan.start_date && plan.end_date) {
+    const s = new Date(plan.start_date);
+    const e = new Date(plan.end_date);
+    text += `${s.toLocaleDateString('en-GB', {month:'long', day:'numeric'})} - ${e.toLocaleDateString('en-GB', {month:'long', day:'numeric', year:'numeric'})}\n`;
+  }
+  text += '\n';
+
+  stops.forEach((stop, i) => {
+    const dayEnd = (stop.day || 1) + (stop.days_here || 1) - 1;
+    text += `Day ${stop.day || (i+1)}${stop.days_here > 1 ? '-' + dayEnd : ''}: ${stop.name}\n`;
+    if (i > 0 && (stop.drive_from_previous_hours || stop.drive_from_previous_km)) {
+      text += `  🚗 ${stop.drive_from_previous_hours || '?'}h drive${stop.drive_from_previous_km ? ' (' + stop.drive_from_previous_km + 'km)' : ''} from ${stops[i-1].name}\n`;
+    }
+    const whyField = stop.why_special || stop.why || '';
+    if (whyField) text += `  ✨ ${whyField}\n`;
+    if (stop.est_accommodation_per_night) text += `  🏨 ~£${stop.est_accommodation_per_night}/night\n`;
+    text += '\n';
+  });
+
+  const totalDrivingKm = plan.total_driving_km || stops.reduce((sum, s) => sum + (s.drive_from_previous_km || 0), 0);
+  const totalAccom = stops.reduce((sum, s) => sum + ((s.est_accommodation_per_night || 0) * (s.days_here || 1)), 0);
+  const totalActivities = stops.reduce((sum, s) => sum + (s.est_activities_cost || 0), 0);
+  const fuelCost = Math.round(totalDrivingKm * 0.15);
+  const totalCost = totalAccom + totalActivities + fuelCost;
+  if (totalCost > 0) {
+    text += `💰 Estimated total: ~£${totalCost.toLocaleString()}\n`;
+  }
+
+  return text;
+}
+
+function copyItinerary() {
+  const text = buildItineraryText();
+  navigator.clipboard.writeText(text).then(() => {
+    const btn = event.target;
+    const orig = btn.textContent;
+    btn.textContent = '✓ Copied!';
+    setTimeout(() => { btn.textContent = orig; }, 2000);
+  }).catch(() => {
+    alert('Failed to copy to clipboard');
+  });
+}
+
+function shareItinerary() {
+  const text = buildItineraryText();
+  if (navigator.share) {
+    navigator.share({ title: currentPlan?.title || 'Road Trip', text }).catch(() => {});
+  } else {
+    navigator.clipboard.writeText(text).then(() => {
+      const btn = event.target;
+      const orig = btn.textContent;
+      btn.textContent = '✓ Copied!';
+      setTimeout(() => { btn.textContent = orig; }, 2000);
+    }).catch(() => {
+      alert('Failed to copy to clipboard');
+    });
   }
 }
 
@@ -2425,9 +3040,9 @@ function drawPlannedRoute(stops) {
   clearPlannedRoute();
   plannedRouteLayer = L.layerGroup().addTo(map);
 
-  // Draw polyline
+  // Draw straight-line polyline as initial/fallback
   const coords = stops.map(s => [s.lat, s.lon]);
-  L.polyline(coords, { color: '#00cc88', weight: 4, opacity: 0.8 }).addTo(plannedRouteLayer);
+  const straightLine = L.polyline(coords, { color: '#00cc88', weight: 4, opacity: 0.8 }).addTo(plannedRouteLayer);
 
   // Numbered markers
   stops.forEach((s, i) => {
@@ -2455,6 +3070,58 @@ function drawPlannedRoute(stops) {
     btn.style.borderColor = 'var(--warn)';
     btn.onclick = clearPlannedRoute;
     document.querySelector('.map-controls').appendChild(btn);
+  }
+
+  // Try to fetch actual driving route
+  fetchDrivingRoute(stops, straightLine);
+}
+
+async function fetchDrivingRoute(stops, straightLine) {
+  try {
+    const resp = await fetch('api/roadtrip/route', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify(stops)
+    });
+    if (!resp.ok) return;
+    const data = await resp.json();
+    if (data.geometry && data.geometry.length > 0 && plannedRouteLayer) {
+      // Remove straight line, draw actual route
+      plannedRouteLayer.removeLayer(straightLine);
+
+      // Draw each segment with distance labels
+      if (data.segments) {
+        data.segments.forEach((seg, i) => {
+          if (seg.geometry && seg.geometry.length > 1) {
+            // OSRM returns [lon,lat], swap to [lat,lon] for Leaflet
+            const segCoords = seg.geometry.map(c => [c[1], c[0]]);
+            L.polyline(segCoords, { color: '#00cc88', weight: 4, opacity: 0.8 }).addTo(plannedRouteLayer);
+
+            // Distance label at midpoint
+            const midIdx = Math.floor(segCoords.length / 2);
+            const midPoint = segCoords[midIdx];
+            const distKm = seg.distance_km ? seg.distance_km.toFixed(0) : '';
+            if (distKm && midPoint) {
+              L.marker(midPoint, {
+                icon: L.divIcon({
+                  className: 'distance-label',
+                  html: `${distKm}km`,
+                  iconSize: [50, 14],
+                  iconAnchor: [25, 7]
+                })
+              }).addTo(plannedRouteLayer);
+            }
+          }
+        });
+      } else {
+        // Single geometry for whole route — OSRM returns [lon,lat]
+        const routeCoords = data.geometry.map(c => [c[1], c[0]]);
+        L.polyline(routeCoords, { color: '#00cc88', weight: 4, opacity: 0.8 }).addTo(plannedRouteLayer);
+      }
+    }
+  } catch(e) {
+    // Keep straight line as fallback — already drawn
+    console.warn('Driving route fetch failed, using straight lines:', e);
   }
 }
 
