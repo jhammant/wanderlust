@@ -10,6 +10,8 @@ A lightweight Flask app with:
 
 import json
 import os
+import re
+import time
 from pathlib import Path
 from datetime import datetime
 
@@ -41,6 +43,8 @@ STATE = {
 DATA_DIR = Path.home() / ".wanderlust"
 TRIPS_FILE = DATA_DIR / "trips.json"
 REVIEWS_FILE = DATA_DIR / "reviews.json"
+PLANNED_TRIPS_FILE = DATA_DIR / "planned_trips.json"
+AVOID_PLACES_FILE = DATA_DIR / "avoid_places.json"
 
 
 def load_state():
@@ -209,6 +213,17 @@ def build_chat_context():
         lines.append(f"- Style: {p.preferences.get('style', '?')}")
         lines.append(f"- Range: {p.avg_distance_km:.0f}km avg, {p.max_distance_km:.0f}km max")
         lines.append(f"- Countries: {', '.join(p.countries_visited)}")
+
+    # Avoid list
+    if AVOID_PLACES_FILE.exists():
+        try:
+            avoid_list = json.loads(AVOID_PLACES_FILE.read_text())
+            if avoid_list:
+                lines.append("\n## Places to NEVER suggest")
+                for place in avoid_list:
+                    lines.append(f"- {place}")
+        except (json.JSONDecodeError, TypeError):
+            pass
 
     return "\n".join(lines)
 
@@ -485,6 +500,7 @@ RULES:
 5. Be specific — name actual towns/regions, not just countries
 6. Consider their kids (Clara age 10, Zoe age 7, Ethan age 4) for family trips
 7. Factor in their travel patterns (seasons, duration, style)
+8. When suggesting destinations, always include: distance from London, best season, which past trip it's similar to, and why it works for Clara (10), Zoe (7), Ethan (4).
 
 {context}
 """
@@ -679,6 +695,260 @@ def api_profile():
         "family_pct": round(p.family_trip_pct),
         "most_travelled_with": p.most_travelled_with,
         "preferences": p.preferences,
+    })
+
+
+# === ROAD TRIP PLANNER ENDPOINTS ===
+
+
+@app.route("/api/roadtrip/generate", methods=["POST"])
+def api_roadtrip_generate():
+    """Generate an AI-powered road trip plan for a specific country."""
+    data = request.json
+    country = data.get("country", "")
+    start_date = data.get("start_date", "")
+    end_date = data.get("end_date", "")
+    who = data.get("who", "")
+    interests = data.get("interests", "")
+    budget = data.get("budget", "")
+    avoid_places = data.get("avoid_places", [])
+    notes = data.get("notes", "")
+
+    context = build_chat_context()
+
+    # Extract past trip stops in the target country with coordinates
+    country_trips = []
+    for trip in STATE["trips"]:
+        if trip.country and trip.country.lower() == country.lower():
+            trip_info = {
+                "place_name": trip.place_name,
+                "lat": trip.center_lat,
+                "lon": trip.center_lon,
+                "dates": f"{trip.start_date.strftime('%b %Y')} - {trip.end_date.strftime('%b %Y')}",
+                "days": trip.duration_days,
+            }
+            # Include stops if available
+            if hasattr(trip, 'stops') and trip.stops:
+                trip_info["stops"] = trip.stops
+            country_trips.append(trip_info)
+
+            # Also include review highlights if available
+            review = STATE["reviews"].get(str(trip.id), {})
+            if review.get("highlights"):
+                trip_info["highlights"] = review["highlights"]
+            if review.get("overall"):
+                trip_info["rating"] = review["overall"]
+
+    past_visits_section = ""
+    if country_trips:
+        past_visits_section = f"\n\nPAST VISITS TO {country.upper()}:\n"
+        for ct in country_trips:
+            past_visits_section += f"- {ct['place_name']} ({ct['dates']}, {ct['days']} days) at ({ct['lat']:.3f}, {ct['lon']:.3f})"
+            if ct.get("highlights"):
+                past_visits_section += f" — enjoyed: {', '.join(ct['highlights'])}"
+            if ct.get("rating"):
+                past_visits_section += f" — rated {ct['rating']}/5"
+            past_visits_section += "\n"
+            if ct.get("stops"):
+                for stop in ct["stops"]:
+                    stop_name = stop.get("name", stop.get("place_name", "Unknown"))
+                    stop_lat = stop.get("lat", stop.get("center_lat", 0))
+                    stop_lon = stop.get("lon", stop.get("center_lon", 0))
+                    past_visits_section += f"  - Stop: {stop_name} at ({stop_lat}, {stop_lon})\n"
+
+    avoid_section = ""
+    if avoid_places:
+        avoid_section = "\n\nADDITIONAL PLACES TO AVOID:\n"
+        for place in avoid_places:
+            avoid_section += f"- {place}\n"
+
+    system_prompt = f"""You are Wanderlust Road Trip Planner, an expert at creating family road trip itineraries.
+
+FAMILY:
+- Jon (dad), Anne (mum), Clara (10), Zoe (7), Ethan (4)
+- Ethan is 4 years old — needs nap stops, shorter driving legs
+- Keep daily driving to 4-5 hours MAX (with young kids, less is better)
+- Include kid-friendly activities at every stop
+
+{context}
+{past_visits_section}
+{avoid_section}
+
+CRITICAL RULES:
+- Avoid suggesting stops within 30km of these visited locations listed above
+- Reference their travel DNA from the profile when choosing destinations
+- Reference review highlights for trips in {country} when explaining choices
+- Give realistic driving times accounting for breaks with young children
+- Return ONLY valid JSON — no markdown fences, no explanation text before or after
+- The JSON must match this exact schema:
+
+{{
+  "title": "string — catchy trip name",
+  "summary": "string — 2-3 sentence overview",
+  "why_these_places": "string — explain the route logic",
+  "total_driving_km": number,
+  "stops": [
+    {{
+      "day": number,
+      "days_here": number,
+      "name": "string — specific town/village name",
+      "lat": number,
+      "lon": number,
+      "activities": ["string array of specific activities"],
+      "why_special": "string — why this place works for the family",
+      "accommodation_type": "string — eg Gite, Airbnb, Hotel, Camping",
+      "drive_from_previous_km": number,
+      "drive_from_previous_hours": number,
+      "similar_to_past": "string — reference a past trip if relevant"
+    }}
+  ],
+  "exclusion_reasoning": "string — explain what was avoided and why"
+}}"""
+
+    user_msg = f"Plan a road trip to {country} from {start_date} to {end_date}."
+    if who:
+        user_msg += f" Travelling with: {who}."
+    if interests:
+        user_msg += f" Interests: {interests}."
+    if budget:
+        user_msg += f" Budget: {budget}."
+    if notes:
+        user_msg += f" Additional notes: {notes}."
+
+    messages = [
+        {"role": "system", "content": system_prompt},
+        {"role": "user", "content": user_msg},
+    ]
+
+    response_text = _get_ai_response(messages)
+
+    # Try to parse JSON response
+    try:
+        result = json.loads(response_text)
+    except json.JSONDecodeError:
+        # Try extracting JSON between outermost { and }
+        match = re.search(r'\{.*\}', response_text, re.DOTALL)
+        if match:
+            try:
+                result = json.loads(match.group())
+            except json.JSONDecodeError:
+                return jsonify({"error": "Failed to parse AI response", "raw": response_text}), 500
+        else:
+            return jsonify({"error": "No JSON found in AI response", "raw": response_text}), 500
+
+    return jsonify(result)
+
+
+@app.route("/api/roadtrip/save", methods=["POST"])
+def api_roadtrip_save():
+    """Save a planned road trip."""
+    DATA_DIR.mkdir(parents=True, exist_ok=True)
+    data = request.json
+
+    # Add ID and creation date
+    data["id"] = f"plan_{int(time.time() * 1000)}"
+    data["created"] = datetime.now().isoformat()
+
+    # Load existing plans
+    plans = []
+    if PLANNED_TRIPS_FILE.exists():
+        try:
+            plans = json.loads(PLANNED_TRIPS_FILE.read_text())
+        except (json.JSONDecodeError, TypeError):
+            plans = []
+
+    plans.append(data)
+    PLANNED_TRIPS_FILE.write_text(json.dumps(plans, indent=2))
+
+    return jsonify({"ok": True, "id": data["id"]})
+
+
+@app.route("/api/roadtrip/plans")
+def api_roadtrip_plans():
+    """Return all saved road trip plans."""
+    if PLANNED_TRIPS_FILE.exists():
+        try:
+            plans = json.loads(PLANNED_TRIPS_FILE.read_text())
+            return jsonify(plans)
+        except (json.JSONDecodeError, TypeError):
+            pass
+    return jsonify([])
+
+
+@app.route("/api/roadtrip/plan/<plan_id>", methods=["DELETE"])
+def api_roadtrip_delete(plan_id):
+    """Delete a saved road trip plan by ID."""
+    if not PLANNED_TRIPS_FILE.exists():
+        return jsonify({"error": "No plans found"}), 404
+
+    try:
+        plans = json.loads(PLANNED_TRIPS_FILE.read_text())
+    except (json.JSONDecodeError, TypeError):
+        return jsonify({"error": "Failed to read plans"}), 500
+
+    original_count = len(plans)
+    plans = [p for p in plans if p.get("id") != plan_id]
+
+    if len(plans) == original_count:
+        return jsonify({"error": "Plan not found"}), 404
+
+    PLANNED_TRIPS_FILE.write_text(json.dumps(plans, indent=2))
+    return jsonify({"ok": True})
+
+
+@app.route("/api/avoid-list", methods=["GET"])
+def api_avoid_list_get():
+    """Return the avoid-places list."""
+    if AVOID_PLACES_FILE.exists():
+        try:
+            avoid_list = json.loads(AVOID_PLACES_FILE.read_text())
+            return jsonify(avoid_list)
+        except (json.JSONDecodeError, TypeError):
+            pass
+    return jsonify([])
+
+
+@app.route("/api/avoid-list", methods=["POST"])
+def api_avoid_list_save():
+    """Save the avoid-places list."""
+    DATA_DIR.mkdir(parents=True, exist_ok=True)
+    data = request.json
+    AVOID_PLACES_FILE.write_text(json.dumps(data, indent=2))
+    return jsonify({"ok": True})
+
+
+@app.route("/api/calendar")
+def api_calendar():
+    """Return calendar data: past trips + UK school holidays 2026-2027."""
+    # Past trips as date ranges
+    past_trips = []
+    for trip in STATE["trips"]:
+        past_trips.append({
+            "id": trip.id,
+            "name": trip.place_name,
+            "country": trip.country,
+            "start": trip.start_date.isoformat(),
+            "end": trip.end_date.isoformat(),
+            "days": trip.duration_days,
+            "family": trip.is_family_trip,
+        })
+
+    # UK school holidays 2026-2027
+    school_holidays = [
+        {"name": "Easter 2026", "start": "2026-03-30", "end": "2026-04-13"},
+        {"name": "May Half Term 2026", "start": "2026-05-25", "end": "2026-05-29"},
+        {"name": "Summer 2026", "start": "2026-07-17", "end": "2026-09-01"},
+        {"name": "October Half Term 2026", "start": "2026-10-26", "end": "2026-10-30"},
+        {"name": "Christmas 2026", "start": "2026-12-18", "end": "2027-01-02"},
+        {"name": "February Half Term 2027", "start": "2027-02-15", "end": "2027-02-19"},
+        {"name": "Easter 2027", "start": "2027-04-05", "end": "2027-04-18"},
+        {"name": "May Half Term 2027", "start": "2027-05-31", "end": "2027-06-04"},
+        {"name": "Summer 2027", "start": "2027-07-23", "end": "2027-09-03"},
+    ]
+
+    return jsonify({
+        "past_trips": past_trips,
+        "school_holidays": school_holidays,
     })
 
 
@@ -887,6 +1157,59 @@ INDEX_HTML = r"""
     to { opacity: 1; transform: translateY(0); }
   }
   .msg { animation: msg-fade-in 0.3s ease-out; }
+
+  /* Planner */
+  .plan-form { padding: 16px; }
+  .plan-form label { display: block; font-size: 12px; font-weight: 600; color: var(--dim); margin: 12px 0 4px; }
+  .plan-form select, .plan-form input[type=date], .plan-form input[type=number] {
+    width: 100%; background: var(--surface); color: var(--text); border: 1px solid var(--border);
+    border-radius: 6px; padding: 8px; font-size: 13px; outline: none;
+  }
+  .plan-form select:focus, .plan-form input:focus { border-color: var(--accent); }
+  .plan-interests { display: flex; flex-wrap: wrap; gap: 4px; }
+  .plan-interest { padding: 4px 10px; border-radius: 14px; border: 1px solid var(--border);
+    font-size: 12px; cursor: pointer; transition: all 0.2s; }
+  .plan-interest.selected { background: var(--accent); color: var(--bg); border-color: var(--accent); }
+  .plan-who { display: flex; flex-wrap: wrap; gap: 4px; }
+  .plan-who label { display: inline-flex; align-items: center; gap: 4px; font-size: 12px;
+    padding: 4px 10px; border-radius: 14px; border: 1px solid var(--border); cursor: pointer; margin: 0; }
+  .plan-who input:checked + span { color: var(--accent); }
+  .generate-btn { width: 100%; padding: 12px; background: var(--accent); color: var(--bg);
+    border: none; border-radius: 8px; font-size: 14px; font-weight: 600; cursor: pointer; margin-top: 16px; }
+  .generate-btn:disabled { opacity: 0.5; cursor: default; }
+
+  /* Route display */
+  .route-stop { padding: 12px; border-left: 3px solid var(--accent); margin-left: 12px; margin-bottom: 0; position: relative; }
+  .route-stop::before { content: attr(data-day); position: absolute; left: -24px; top: 12px;
+    background: var(--accent); color: var(--bg); width: 20px; height: 20px; border-radius: 50%;
+    display: flex; align-items: center; justify-content: center; font-size: 10px; font-weight: 700; }
+  .route-stop h4 { font-size: 14px; margin: 0 0 4px; }
+  .route-stop .drive-info { font-size: 11px; color: var(--dim); margin-bottom: 6px; }
+  .route-stop .activities { font-size: 12px; }
+  .route-stop .why { font-size: 12px; color: var(--accent); font-style: italic; margin-top: 4px; }
+  .route-stop .similar { font-size: 11px; color: var(--dim); margin-top: 2px; }
+  .route-stop .stop-actions { display: flex; gap: 4px; margin-top: 6px; }
+  .route-stop .stop-actions button { padding: 2px 8px; font-size: 11px; border: 1px solid var(--border);
+    border-radius: 4px; background: var(--surface); color: var(--dim); cursor: pointer; }
+
+  .plan-loading { padding: 40px 16px; text-align: center; }
+  .plan-loading .pulse { animation: pulse 1.5s ease-in-out infinite; }
+  @keyframes pulse { 0%, 100% { opacity: 0.4; } 50% { opacity: 1; } }
+
+  /* Calendar */
+  .cal-grid { display: grid; grid-template-columns: repeat(12, 1fr); gap: 2px; padding: 8px; }
+  .cal-month { font-size: 10px; text-align: center; padding: 4px; border-radius: 4px; }
+  .cal-month.has-trip { background: rgba(0,204,136,0.2); border: 1px solid var(--accent); }
+  .cal-month.holiday { background: rgba(255,170,0,0.15); border: 1px solid #aa7700; }
+  .cal-month.gap { background: rgba(0,136,255,0.1); border: 1px dashed var(--accent2); cursor: pointer; }
+  .cal-year-label { font-size: 11px; font-weight: 600; color: var(--dim); padding: 4px 0; }
+
+  /* Saved plans */
+  .saved-plan { padding: 10px; border: 1px solid var(--border); border-radius: 8px;
+    margin-bottom: 8px; cursor: pointer; transition: border-color 0.2s; }
+  .saved-plan:hover { border-color: var(--accent); }
+  .saved-plan h4 { font-size: 13px; margin: 0 0 2px; }
+  .saved-plan .meta { font-size: 11px; color: var(--dim); }
 </style>
 </head>
 <body>
@@ -935,6 +1258,7 @@ INDEX_HTML = r"""
   <div class="sidebar">
     <div class="tabs">
       <div class="tab active" data-panel="chat">💬 Ask</div>
+      <div class="tab" data-panel="plan">🗺️ Plan</div>
       <div class="tab" data-panel="review">⭐ Review</div>
       <div class="tab" data-panel="timeline">📅 Timeline</div>
       <div class="tab" data-panel="frequency">🔄 Freq</div>
@@ -962,6 +1286,15 @@ INDEX_HTML = r"""
         <input id="chatInput" placeholder="Where should we go next?" onkeydown="if(event.key==='Enter')sendChat()">
         <button onclick="sendChat()" id="sendBtn">→</button>
       </div>
+    </div>
+
+    <div class="panel" id="panel-plan" style="overflow-y:auto">
+      <div style="display:flex;border-bottom:1px solid var(--border)">
+        <button class="tab" style="flex:1" onclick="showPlanView('planner')" id="planViewPlanner">🗺️ Planner</button>
+        <button class="tab" style="flex:1" onclick="showPlanView('calendar')" id="planViewCalendar">📅 Calendar</button>
+        <button class="tab" style="flex:1" onclick="showPlanView('saved')" id="planViewSaved">💾 Saved</button>
+      </div>
+      <div id="planContent"></div>
     </div>
 
     <div class="panel" id="panel-review">
@@ -1002,6 +1335,10 @@ let selectedTrip = null;
 let map, markers = {};
 let markerLayer, heatLayer, freqLayer;
 let layers = { markers: true, heat: false, freq: false };
+let currentPlan = null;
+let plannerState = 'setup';
+let plannedRouteLayer = null;
+let exclusionZoneLayer = null;
 
 // === INIT ===
 async function init() {
@@ -1090,6 +1427,11 @@ async function init() {
 
   // Load profile
   loadProfile();
+
+  // Init planner layers
+  plannedRouteLayer = L.layerGroup();
+  exclusionZoneLayer = L.layerGroup();
+  renderPlanSetup();
 }
 
 function renderTripCards() {
@@ -1870,6 +2212,386 @@ function renderTimeline(filteredTrips) {
   });
 
   container.innerHTML = html || '<p style="color:var(--dim)">No trips match filters</p>';
+}
+
+// === PLANNER ===
+let currentPlanView = 'planner';
+
+function showPlanView(view) {
+  currentPlanView = view;
+  document.getElementById('planViewPlanner').classList.toggle('active', view === 'planner');
+  document.getElementById('planViewCalendar').classList.toggle('active', view === 'calendar');
+  document.getElementById('planViewSaved').classList.toggle('active', view === 'saved');
+  if (view === 'planner') {
+    if (plannerState === 'setup') renderPlanSetup();
+    else if (plannerState === 'result' && currentPlan) renderPlanResult(currentPlan);
+  } else if (view === 'calendar') {
+    renderCalendar();
+  } else if (view === 'saved') {
+    renderSavedPlans();
+  }
+}
+
+function renderPlanSetup() {
+  plannerState = 'setup';
+  const countries = [...new Set(trips.map(t => t.country).filter(Boolean))].sort();
+  const countryOptions = countries.map(c => `<option value="${c}">${c}</option>`).join('') +
+    '<option value="__new__">Somewhere new...</option>';
+
+  const interests = ['Beach', 'Nature', 'Food', 'Culture', 'Adventure', 'Relaxation', 'City', 'History'];
+  const interestChips = interests.map(i =>
+    `<span class="plan-interest" onclick="this.classList.toggle('selected')">${i}</span>`
+  ).join('');
+
+  const people = ['Jon', 'Anne', 'Clara', 'Zoë', 'Ethan'];
+  const whoChecks = people.map(p =>
+    `<label><input type="checkbox" name="plan-who" value="${p}" checked> <span>${p}</span></label>`
+  ).join('');
+
+  const budgetRadios = ['Low', 'Medium', 'High', 'Luxury'].map((b, i) =>
+    `<label style="display:inline-flex;align-items:center;gap:4px;font-size:12px;cursor:pointer;margin-right:12px">
+      <input type="radio" name="plan-budget" value="${b.toLowerCase()}" ${i === 1 ? 'checked' : ''} style="accent-color:var(--accent)"> ${b}
+    </label>`
+  ).join('');
+
+  document.getElementById('planContent').innerHTML = `
+    <div class="plan-form">
+      <label>Country / Region</label>
+      <select id="planCountry">${countryOptions}</select>
+
+      <label>Who's going?</label>
+      <div class="plan-who">${whoChecks}</div>
+
+      <label>Interests</label>
+      <div class="plan-interests">${interestChips}</div>
+
+      <label>Budget</label>
+      <div>${budgetRadios}</div>
+
+      <label>Start date</label>
+      <input type="date" id="planStart">
+
+      <label>End date</label>
+      <input type="date" id="planEnd">
+
+      <label>Max driving per day (hours)</label>
+      <input type="number" id="planMaxDrive" value="4" min="1" max="10">
+
+      <label>Notes</label>
+      <textarea id="planNotes" class="inline-notes" placeholder="e.g. avoid motorways, must see the coast..."></textarea>
+
+      <button class="generate-btn" onclick="generateRoadTrip()">Generate Route</button>
+    </div>
+  `;
+}
+
+async function generateRoadTrip() {
+  const country = document.getElementById('planCountry').value;
+  const countryLabel = country === '__new__' ? 'somewhere new' : country;
+  const who = [...document.querySelectorAll('input[name="plan-who"]:checked')].map(c => c.value);
+  const interests = [...document.querySelectorAll('.plan-interest.selected')].map(c => c.textContent);
+  const budget = document.querySelector('input[name="plan-budget"]:checked')?.value || 'medium';
+  const startDate = document.getElementById('planStart').value;
+  const endDate = document.getElementById('planEnd').value;
+  const maxDrive = document.getElementById('planMaxDrive').value;
+  const notes = document.getElementById('planNotes').value;
+
+  renderPlanLoading(countryLabel);
+
+  try {
+    const resp = await fetch('api/roadtrip/generate', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({ country, who, interests, budget, start_date: startDate, end_date: endDate, max_drive_hours: maxDrive, notes })
+    });
+    if (!resp.ok) throw new Error('Failed to generate route');
+    const plan = await resp.json();
+    currentPlan = plan;
+    plannerState = 'result';
+    renderPlanResult(plan);
+  } catch(e) {
+    document.getElementById('planContent').innerHTML = `
+      <div style="padding:20px;text-align:center">
+        <div style="font-size:24px;margin-bottom:8px">😕</div>
+        <div style="color:var(--warn);margin-bottom:12px">Failed to generate route</div>
+        <div style="font-size:12px;color:var(--dim);margin-bottom:16px">${e.message}</div>
+        <button class="generate-btn" style="width:auto;padding:8px 20px" onclick="renderPlanSetup()">← Try again</button>
+      </div>
+    `;
+  }
+}
+
+function renderPlanLoading(country) {
+  const countryTrips = trips.filter(t => t.country && t.country.toLowerCase() === country.toLowerCase());
+  const context = countryTrips.length
+    ? `Checking ${countryTrips.length} place${countryTrips.length > 1 ? 's' : ''} you've been in ${country}...`
+    : `Exploring fresh territory in ${country}...`;
+
+  document.getElementById('planContent').innerHTML = `
+    <div class="plan-loading">
+      <div class="pulse" style="font-size:48px;margin-bottom:16px">🗺️</div>
+      <div style="font-size:16px;font-weight:600;margin-bottom:8px">Planning your ${country} road trip...</div>
+      <div style="font-size:12px;color:var(--dim)">${context}</div>
+    </div>
+  `;
+}
+
+function renderPlanResult(plan) {
+  plannerState = 'result';
+  const stops = plan.stops || [];
+
+  let stopsHtml = '<div style="padding:16px 16px 0">';
+  stopsHtml += `<h3 style="margin-bottom:4px">🗺️ ${plan.title || plan.country + ' Road Trip'}</h3>`;
+  stopsHtml += `<div style="font-size:12px;color:var(--dim);margin-bottom:16px">${plan.summary || ''}</div>`;
+
+  stops.forEach((stop, i) => {
+    const driveInfo = i > 0 && stop.drive_time ? `<div class="drive-info">🚗 ${stop.drive_time} from ${stops[i-1].name}</div>` : '';
+    const activities = stop.activities ? `<div class="activities">${stop.activities.map(a => `• ${a}`).join('<br>')}</div>` : '';
+    const why = stop.why ? `<div class="why">"${stop.why}"</div>` : '';
+    const similar = stop.similar_to ? `<div class="similar">Similar to your trip to ${stop.similar_to}</div>` : '';
+    const actions = `<div class="stop-actions">
+      <button onclick="map.setView([${stop.lat},${stop.lon}],12)">📍 Show</button>
+      <button onclick="window.open('https://www.google.com/maps/search/?api=1&query=${stop.lat},${stop.lon}','_blank')">🗺️ Google Maps</button>
+    </div>`;
+
+    stopsHtml += `<div class="route-stop" data-day="${i + 1}">
+      <h4>${stop.name}</h4>
+      ${driveInfo}
+      ${activities}
+      ${why}
+      ${similar}
+      ${actions}
+    </div>`;
+  });
+
+  stopsHtml += `<div style="display:flex;gap:8px;margin-top:20px;padding-bottom:16px">
+    <button class="generate-btn" style="flex:1" onclick="savePlan()">💾 Save plan</button>
+    <button class="generate-btn" style="flex:1;background:var(--accent2)" onclick="generateRoadTrip()">🔄 Regenerate</button>
+  </div>`;
+  stopsHtml += `<div style="padding-bottom:16px">
+    <button class="generate-btn" style="background:var(--surface);color:var(--accent);border:1px solid var(--accent)" onclick="refineInChat()">💬 Refine in chat</button>
+  </div>`;
+  stopsHtml += `<div style="padding-bottom:16px">
+    <button class="generate-btn" style="background:var(--surface);color:var(--dim);border:1px solid var(--border)" onclick="renderPlanSetup()">← New plan</button>
+  </div>`;
+  stopsHtml += '</div>';
+
+  document.getElementById('planContent').innerHTML = stopsHtml;
+
+  if (stops.length) {
+    drawPlannedRoute(stops);
+    if (plan.country) drawExclusionZones(plan.country);
+  }
+}
+
+function refineInChat() {
+  if (!currentPlan) return;
+  switchTab('chat');
+  const stopNames = (currentPlan.stops || []).map(s => s.name).join(', ');
+  const msg = `I have a road trip plan for ${currentPlan.country || 'a trip'} with stops: ${stopNames}. Can you help me refine it?`;
+  document.getElementById('chatInput').value = msg;
+  sendChat();
+}
+
+function drawPlannedRoute(stops) {
+  clearPlannedRoute();
+  plannedRouteLayer = L.layerGroup().addTo(map);
+
+  // Draw polyline
+  const coords = stops.map(s => [s.lat, s.lon]);
+  L.polyline(coords, { color: '#00cc88', weight: 4, opacity: 0.8 }).addTo(plannedRouteLayer);
+
+  // Numbered markers
+  stops.forEach((s, i) => {
+    L.circleMarker([s.lat, s.lon], {
+      radius: 12, color: '#00cc88', fillColor: '#00cc88', fillOpacity: 1, weight: 0
+    }).bindTooltip(`${i + 1}`, { permanent: true, direction: 'center', className: 'stop-number' })
+      .bindPopup(`<b>${s.name}</b>${s.why ? '<br><em>' + s.why + '</em>' : ''}`)
+      .addTo(plannedRouteLayer);
+  });
+
+  // Dim existing trip markers
+  Object.values(markers).forEach(m => { m.setStyle({ fillOpacity: 0.3, opacity: 0.3 }); });
+
+  // Fit bounds
+  if (coords.length) map.fitBounds(coords, { padding: [40, 40] });
+
+  // Add clear button
+  if (!document.getElementById('clearPlanBtn')) {
+    const btn = document.createElement('button');
+    btn.id = 'clearPlanBtn';
+    btn.className = 'map-btn';
+    btn.textContent = '✕ Clear plan';
+    btn.style.background = 'var(--warn)';
+    btn.style.color = 'white';
+    btn.style.borderColor = 'var(--warn)';
+    btn.onclick = clearPlannedRoute;
+    document.querySelector('.map-controls').appendChild(btn);
+  }
+}
+
+function drawExclusionZones(country) {
+  if (exclusionZoneLayer) map.removeLayer(exclusionZoneLayer);
+  exclusionZoneLayer = L.layerGroup().addTo(map);
+
+  trips.forEach(t => {
+    if (t.country && t.country.toLowerCase() === country.toLowerCase()) {
+      const visitDate = new Date(t.end).toLocaleDateString('en-GB', { month: 'short', year: 'numeric' });
+      L.circle([t.lat, t.lon], {
+        radius: 50000, color: '#888', fillColor: '#888', fillOpacity: 0.15, weight: 1, dashArray: '4,4'
+      }).bindTooltip(`Visited ${visitDate}`, { direction: 'top' })
+        .addTo(exclusionZoneLayer);
+    }
+  });
+}
+
+function clearPlannedRoute() {
+  if (plannedRouteLayer) { map.removeLayer(plannedRouteLayer); plannedRouteLayer = L.layerGroup(); }
+  if (exclusionZoneLayer) { map.removeLayer(exclusionZoneLayer); exclusionZoneLayer = L.layerGroup(); }
+
+  // Restore marker opacity
+  Object.values(markers).forEach(m => { m.setStyle({ fillOpacity: 0.6, opacity: 1 }); });
+
+  // Remove clear button
+  const btn = document.getElementById('clearPlanBtn');
+  if (btn) btn.remove();
+}
+
+async function savePlan() {
+  if (!currentPlan) return;
+  try {
+    const resp = await fetch('api/roadtrip/save', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify(currentPlan)
+    });
+    if (resp.ok) {
+      const saveBtn = document.querySelector('.generate-btn');
+      if (saveBtn && saveBtn.textContent.includes('Save')) {
+        saveBtn.textContent = '✓ Saved!';
+        saveBtn.disabled = true;
+        setTimeout(() => { saveBtn.textContent = '💾 Save plan'; saveBtn.disabled = false; }, 2000);
+      }
+    }
+  } catch(e) {
+    alert('Failed to save plan');
+  }
+}
+
+async function renderCalendar() {
+  const container = document.getElementById('planContent');
+  const months = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
+
+  // Build trip months lookup
+  const tripMonths = {};
+  trips.forEach(t => {
+    const start = new Date(t.start);
+    const end = new Date(t.end);
+    let d = new Date(start.getFullYear(), start.getMonth(), 1);
+    while (d <= end) {
+      const key = `${d.getFullYear()}-${d.getMonth()}`;
+      if (!tripMonths[key]) tripMonths[key] = [];
+      tripMonths[key].push(t.name || t.country);
+      d.setMonth(d.getMonth() + 1);
+    }
+  });
+
+  // School holidays (approximate UK)
+  const schoolHolidays = {
+    0: 'Winter half-term', 3: 'Easter', 4: 'May half-term',
+    6: 'Summer', 7: 'Summer', 9: 'October half-term', 11: 'Christmas'
+  };
+
+  const years = [...new Set(trips.map(t => new Date(t.start).getFullYear()))].sort();
+  const minYear = Math.min(...years, new Date().getFullYear());
+  const maxYear = Math.max(...years, new Date().getFullYear() + 1);
+
+  let html = '<div style="padding:12px">';
+  html += '<div style="font-size:13px;color:var(--dim);margin-bottom:8px">🟢 Trip &nbsp; 🟡 School holiday &nbsp; 🔵 Available gap</div>';
+
+  for (let y = maxYear; y >= minYear; y--) {
+    html += `<div class="cal-year-label">${y}</div>`;
+    html += '<div class="cal-grid">';
+    for (let m = 0; m < 12; m++) {
+      const key = `${y}-${m}`;
+      const hasTrip = tripMonths[key];
+      const isHoliday = schoolHolidays[m];
+      const isGap = !hasTrip && isHoliday;
+      const isPast = new Date(y, m + 1, 0) < new Date();
+
+      let cls = 'cal-month';
+      let title = months[m];
+      if (hasTrip) { cls += ' has-trip'; title += ': ' + hasTrip.join(', '); }
+      else if (isGap && !isPast) { cls += ' gap'; title += ' — ' + isHoliday + ' (available)'; }
+      else if (isHoliday && !isPast) { cls += ' holiday'; title += ' — ' + isHoliday; }
+
+      const clickHandler = isGap && !isPast
+        ? ` onclick="prefillPlanDates(${y},${m})"`
+        : '';
+
+      html += `<div class="${cls}" title="${title}"${clickHandler}>${months[m]}</div>`;
+    }
+    html += '</div>';
+  }
+  html += '</div>';
+
+  container.innerHTML = html;
+}
+
+function prefillPlanDates(year, month) {
+  showPlanView('planner');
+  setTimeout(() => {
+    const startEl = document.getElementById('planStart');
+    const endEl = document.getElementById('planEnd');
+    if (startEl) {
+      const start = new Date(year, month, 1);
+      const end = new Date(year, month + 1, 0);
+      startEl.value = start.toISOString().split('T')[0];
+      endEl.value = end.toISOString().split('T')[0];
+    }
+  }, 50);
+}
+
+async function renderSavedPlans() {
+  const container = document.getElementById('planContent');
+  container.innerHTML = '<div style="padding:20px;text-align:center;color:var(--dim)">Loading saved plans...</div>';
+
+  try {
+    const resp = await fetch('api/roadtrip/plans');
+    if (!resp.ok) throw new Error('No saved plans');
+    const plans = await resp.json();
+
+    if (!plans.length) {
+      container.innerHTML = '<div style="padding:20px;text-align:center;color:var(--dim)">No saved plans yet. Generate a road trip to get started!</div>';
+      return;
+    }
+
+    let html = '<div style="padding:12px">';
+    plans.forEach((plan, i) => {
+      const stopCount = plan.stops?.length || 0;
+      const dateStr = plan.start_date ? new Date(plan.start_date).toLocaleDateString('en-GB', {month:'short', year:'numeric'}) : '';
+      html += `<div class="saved-plan" onclick="loadSavedPlan(${i})">
+        <h4>${plan.title || plan.country || 'Road Trip'}</h4>
+        <div class="meta">${dateStr}${dateStr ? ' · ' : ''}${stopCount} stops${plan.who ? ' · ' + plan.who.join(', ') : ''}</div>
+      </div>`;
+    });
+    html += '</div>';
+    container.innerHTML = html;
+
+    // Store for loading
+    window._savedPlans = plans;
+  } catch(e) {
+    container.innerHTML = '<div style="padding:20px;text-align:center;color:var(--dim)">No saved plans yet. Generate a road trip to get started!</div>';
+  }
+}
+
+function loadSavedPlan(index) {
+  const plans = window._savedPlans;
+  if (!plans || !plans[index]) return;
+  currentPlan = plans[index];
+  plannerState = 'result';
+  showPlanView('planner');
+  renderPlanResult(currentPlan);
 }
 
 // === BOOT ===
