@@ -8,3 +8,27 @@ build/
 *.sqlite
 travel-map.html
 trips.json
+
+# Wanderlust data directory
+wanderlust_data/
+
+# Environment variables
+.env
+
+# macOS system files
+.DS_Store
+.AppleDouble
+.LSOverride
+._*
+
+# IDE and editor files
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# Test coverage
+htmlcov/
+.coverage
+.cov
