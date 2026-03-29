@@ -15,7 +15,9 @@
 
 ## ✨ What It Looks Like
 
-<img src="docs/screenshots/linkedin-hero.png" alt="Wanderlust UI Preview" width="1400"/>
+![Wanderlust UI Preview](docs/screenshots/linkedin-hero.png)
+
+**Real Apple Photos Data:** Scan your library and discover actual trips with AI-powered recommendations 🌍✨
 
 See your trips on an interactive map, explore your travel timeline, get AI-powered recommendations, and plan road trips with our comprehensive web interface.
 
