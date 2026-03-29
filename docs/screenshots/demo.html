@@ -60,6 +60,14 @@
   .flag-spain { background: #c60b1e; color: white; }
   .flag-italy { background: #009246; color: white; }
   .flag-uk { background: #012169; color: white; }
+  .flag-germany { background: #000000; color: gold; }
+  .flag-netherlands { background: #f37b2d; color: white; }
+  .flag-portugal { background: #006543; color: white; }
+  .flag-sweden { background: #006aa7; color: white; }
+  .flag-iceland { background: #02529c; color: white; }
+  .flag-thailand { background: #bf0a30; color: white; }
+  .flag morocco { background: #c1272d; color: white; }
+  .flag-greece { background: #0d5eaf; color: white; }
   
   .place-name { font-size: 1.3rem; font-weight: bold; margin-bottom: 4px; }
   .place-country { color: var(--dim); font-size: 0.9rem; }
@@ -129,7 +137,7 @@
   .map-placeholder {
     background: linear-gradient(135deg, #0a0a0f 0%, #16213e 50%, #0a0a0f 100%);
     border-radius: var(--radius);
-    height: 400px;
+    height: 500px;
     display: flex;
     align-items: center;
     justify-content: center;
@@ -169,6 +177,30 @@
   
   .stat-icon { font-size: 2rem; margin-bottom: 8px; }
   .stat-count { font-size: 1.5rem; font-weight: bold; color: var(--accent); }
+  
+  .bar-chart { display: flex; align-items: flex-end; gap: 8px; height: 150px; padding-top: 24px; }
+  .bar-container { flex: 1; display: flex; flex-direction: column; align-items: center; gap: 8px; }
+  .bar { width: 100%; background: linear-gradient(to top, var(--accent) 0%, #00aa66 100%); border-radius: 4px 4px 0 0; transition: height 1s ease-in-out; }
+  .bar-label { font-size: 0.8rem; color: var(--dim); }
+  .bar-value { font-weight: bold; color: var(--accent); }
+  
+  .quote-wall {
+    background: linear-gradient(135deg, #1a1a2e 0%, #16213e 50%, #0a0a0f 100%);
+    border-radius: var(--radius);
+    padding: 32px;
+    position: relative;
+  }
+  
+  .quote-item {
+    background: rgba(255,255,255,0.05);
+    padding: 24px;
+    margin-bottom: 16px;
+    border-radius: var(--radius);
+    border-left: 3px solid var(--accent);
+  }
+  
+  .quote-text { font-style: italic; font-size: 1.1rem; }
+  .quote-author { text-align: right; margin-top: 8px; font-weight: bold; color: var(--dim); }
 </style>
 </head>
 <body>
@@ -187,35 +219,51 @@
       <div class="stats-grid">
         <div class="stat-item">
           <div class="stat-icon">🌍</div>
-          <div class="stat-count">12</div>
+          <div class="stat-count">23</div>
           <div class="stat-label">Countries Visited</div>
         </div>
         <div class="stat-item">
-          <div class="stat-icon">✈️</div>
-          <div class="stat-count">6,800</div>
-          <div class="stat-label">Avg Distance (km)</div>
+          <div class="stat-icon">🏙️</div>
+          <div class="stat-count">47</div>
+          <div class="stat-label">Cities Explored</div>
         </div>
         <div class="stat-item">
-          <div class="stat-icon">👨‍👩‍👧</div>
-          <div class="stat-count">83%</div>
-          <div class="stat-label">Family Trips</div>
+          <div class="stat-icon">📏</div>
+          <div class="stat-count">15,000</div>
+          <div class="stat-label">Avg Distance (km)</div>
         </div>
       </div>
       
-      <div style="margin-top: 32px;">
-        <h3>Season Preferences</h3>
-        <div class="stat-box">
-          <span class="flag flag-france">☀️ Summer</span>
-          <span class="tag">Spring Break</span>
+      <div class="grid-2" style="margin-top: 32px;">
+        <div>
+          <h3>📊 Trip Statistics</h3>
+          <div class="bar-chart" style="margin-top: 16px;">
+            <div class="bar-container">
+              <div class="bar" style="height: 85%;"></div>
+              <span class="bar-value">8 days avg</span>
+            </div>
+            <div class="bar-container">
+              <div class="bar" style="height: 78%;"></div>
+              <span class="bar-value">78%</span>
+            </div>
+            <div class="bar-container">
+              <div class="bar" style="height: 65%;"></div>
+              <span class="bar-value">Summer</span>
+            </div>
+          </div>
         </div>
-      </div>
-      
-      <div style="margin-top: 24px;">
-        <h3>Trip Style</h3>
-        <div class="stat-box">
-          <span class="tag">📍 Family-oriented</span>
-          <span class="tag">🌊 Beach & Culture</span>
-          <span class="tag">🍽️ Foodie</span>
+        
+        <div style="padding: 20px;">
+          <h3>旅行风格</h3>
+          <div style="margin-top: 16px;">
+            <span class="tag">📍 Family-oriented</span>
+            <br><br>
+            <span class="tag">🌊 Beach & Culture</span>
+            <br><br>
+            <span class="tag">🍽️ Foodie</span>
+            <br><br>
+            <span class="tag">🏔️ Adventure</span>
+          </div>
         </div>
       </div>
     </div>
@@ -226,23 +274,39 @@
     <h2>🗺️ Your Trip Map</h2>
     
     <div class="card">
-      <div class="map-placeholder">
+      <div class="map-placeholder" id="mapArea">
         <!-- Paris -->
-        <div class="map-pin" style="top: 45%; left: 52%;"></div>
+        <div class="map-pin" style="top: 45%; left: 52%;" title="Paris, France"></div>
         <!-- Barcelona -->
-        <div class="map-pin" style="top: 52%; left: 48%;"></div>
+        <div class="map-pin" style="top: 52%; left: 48%;" title="Barcelona, Spain"></div>
         <!-- Lisbon -->
-        <div class="map-pin" style="top: 54%; left: 40%;"></div>
+        <div class="map-pin" style="top: 54%; left: 40%;" title="Lisbon, Portugal"></div>
         <!-- Rome -->
-        <div class="map-pin" style="top: 48%; left: 56%;"></div>
+        <div class="map-pin" style="top: 48%; left: 56%;" title="Rome, Italy"></div>
         <!-- London -->
-        <div class="map-pin" style="top: 42%; left: 47%;"></div>
+        <div class="map-pin" style="top: 42%; left: 47%;" title="London, UK"></div>
         <!-- Amsterdam -->
-        <div class="map-pin" style="top: 43%; left: 54%;"></div>
+        <div class="map-pin" style="top: 43%; left: 54%;" title="Amsterdam, Netherlands"></div>
+        <!-- Reykjavik -->
+        <div class="map-pin" style="top: 30%; left: 42%;" title="Reykjavík, Iceland"></div>
+        <!-- Athens -->
+        <div class="map-pin" style="top: 50%; left: 64%;" title="Athens, Greece"></div>
+        <!-- Bangkok -->
+        <div class="map-pin" style="top: 65%; left: 78%;" title="Bangkok, Thailand"></div>
+        <!-- Marrakesh -->
+        <div class="map-pin" style="top: 52%; left: 38%;" title="Marrakesh, Morocco"></div>
+        <!-- Edinburgh -->
+        <div class="map-pin" style="top: 40%; left: 46%;" title="Edinburgh, Scotland"></div>
+        <!-- Windermere -->
+        <div class="map-pin" style="top: 41%; left: 45%;" title="Lake District, UK"></div>
+        <!-- St Ives -->
+        <div class="map-pin" style="top: 39%; left: 41%;" title="Cornwall, UK"></div>
+        <!-- Zagreb -->
+        <div class="map-pin" style="top: 49%; left: 58%;" title="Dubrovnik, Croatia"></div>
         
-        <div style="position: absolute; background: rgba(0,0,0,0.7); padding: 12px; border-radius: var(--radius);">
-          <div style="color: var(--accent); font-weight: bold;">12 Trips Across Europe & Beyond</div>
-          <div style="color: var(--dim); font-size: 0.9rem;">2022 — 2026</div>
+        <div style="position: absolute; background: rgba(0,0,0,0.8); padding: 24px; border-radius: var(--radius);">
+          <div style="color: var(--accent); font-weight: bold; font-size: 1.5rem;">269 Trips Across <span style="color: var(--gold);">23</span> Countries</div>
+          <div style="color: var(--dim); font-size: 1.1rem;">May 2003 — Mar 2026</div>
         </div>
       </div>
     </div>
@@ -250,12 +314,145 @@
 
   <!-- TIMELINE SECTION -->
   <section class="section">
-    <h2>📅 Your Travel Timeline</h2>
+    <h2>📅 Your Travel Timeline (2019-2025)</h2>
     
     <div class="card">
-      <!-- 2026 -->
+      <!-- 2019 -->
       <div class="timeline-item">
-        <div class="timeline-year">2026</div>
+        <div class="timeline-year">2019</div>
+        <div class="timeline-content">
+          <div style="display: flex; justify-content: space-between;">
+            <div class="place-name">
+              <span class="flag flag-france">🇫🇷</span> Paris, France
+            </div>
+          </div>
+          <div style="display: flex; align-items: center; gap: 16px; margin-top: 8px;">
+            <span class="tag">5 days</span>
+            <span class="tag">182 photos</span>
+            <span class="rating-stars">★★★★★</span>
+          </div>
+        </div>
+      </div>
+
+      <!-- 2020 -->
+      <div class="timeline-item">
+        <div class="timeline-year">2020</div>
+        <div class="timeline-content">
+          <div style="display: flex; justify-content: space-between;">
+            <div class="place-name">
+              <span class="flag flag-uk">🇬🇧</span> Lake District, UK
+            </div>
+          </div>
+          <div style="display: flex; align-items: center; gap: 16px; margin-top: 8px;">
+            <span class="tag">7 days</span>
+            <span class="tag">245 photos</span>
+            <span class="rating-stars">★★★★☆</span>
+          </div>
+        </div>
+      </div>
+
+      <!-- 2021 -->
+      <div class="timeline-item">
+        <div class="timeline-year">2021</div>
+        <div class="timeline-content">
+          <div style="display: flex; justify-content: space-between;">
+            <div class="place-name">
+              <span class="flag flag-uk">🇬🇧</span> Cornwall, UK
+            </div>
+          </div>
+          <div style="display: flex; align-items: center; gap: 16px; margin-top: 8px;">
+            <span class="tag">8 days</span>
+            <span class="tag">312 photos</span>
+            <span class="rating-stars">★★★★★</span>
+          </div>
+        </div>
+      </div>
+
+      <!-- 2022 -->
+      <div class="timeline-item">
+        <div class="timeline-year">2022</div>
+        <div class="timeline-content">
+          <div style="display: flex; justify-content: space-between;">
+            <div class="place-name">
+              <span class="flag flag-spain">🇪🇸</span> Barcelona, Spain
+            </div>
+          </div>
+          <div style="display: flex; align-items: center; gap: 16px; margin-top: 8px;">
+            <span class="tag">7 days</span>
+            <span class="tag">485 photos</span>
+            <span class="rating-stars">★★★★★</span>
+          </div>
+        </div>
+      </div>
+
+      <div class="timeline-item">
+        <div class="timeline-year">2022</div>
+        <div class="timeline-content">
+          <div style="display: flex; justify-content: space-between;">
+            <div class="place-name">
+              <span class="flag flag-uk">🇬🇧</span> Edinburgh, Scotland
+            </div>
+          </div>
+          <div style="display: flex; align-items: center; gap: 16px; margin-top: 8px;">
+            <span class="tag">5 days</span>
+            <span class="tag">198 photos</span>
+            <span class="rating-stars">★★★★☆</span>
+          </div>
+        </div>
+      </div>
+
+      <!-- 2023 -->
+      <div class="timeline-item">
+        <div class="timeline-year">2023</div>
+        <div class="timeline-content">
+          <div style="display: flex; justify-content: space-between;">
+            <div class="place-name">
+              <span class="flag flag-usa">🇺🇸</span> New York, USA
+            </div>
+          </div>
+          <div style="display: flex; align-items: center; gap: 16px; margin-top: 8px;">
+            <span class="tag">7 days</span>
+            <span class="tag">389 photos</span>
+            <span class="rating-stars">★★★★★</span>
+          </div>
+        </div>
+      </div>
+
+      <div class="timeline-item">
+        <div class="timeline-year">2023</div>
+        <div class="timeline-content">
+          <div style="display: flex; justify-content: space-between;">
+            <div class="place-name">
+              <span class="flag flag-greece">🇬🇷</span> Athens, Greece
+            </div>
+          </div>
+          <div style="display: flex; align-items: center; gap: 16px; margin-top: 8px;">
+            <span class="tag">5 days</span>
+            <span class="tag">223 photos</span>
+            <span class="rating-stars">★★★★☆</span>
+          </div>
+        </div>
+      </div>
+
+      <div class="timeline-item">
+        <div class="timeline-year">2023</div>
+        <div class="timeline-content">
+          <div style="display: flex; justify-content: space-between;">
+            <div class="place-name">
+              <span class="flag flag-italy">🇮🇹</span> Rome, Italy
+            </div>
+          </div>
+          <div style="display: flex; align-items: center; gap: 16px; margin-top: 8px;">
+            <span class="tag">6 days</span>
+            <span class="tag">267 photos</span>
+            <span class="rating-stars">★★★★★</span>
+          </div>
+        </div>
+      </div>
+
+      <!-- 2024 -->
+      <div class="timeline-item">
+        <div class="timeline-year">2024</div>
         <div class="timeline-content">
           <div style="display: flex; justify-content: space-between;">
             <div class="place-name">
@@ -270,18 +467,50 @@
         </div>
       </div>
 
+      <div class="timeline-item">
+        <div class="timeline-year">2024</div>
+        <div class="timeline-content">
+          <div style="display: flex; justify-content: space-between;">
+            <div class="place-name">
+              <span class="flag flag-netherlands">🇳🇱</span> Amsterdam, Netherlands
+            </div>
+          </div>
+          <div style="display: flex; align-items: center; gap: 16px; margin-top: 8px;">
+            <span class="tag">4 days</span>
+            <span class="tag">178 photos</span>
+            <span class="rating-stars">★★★★☆</span>
+          </div>
+        </div>
+      </div>
+
+      <div class="timeline-item">
+        <div class="timeline-year">2024</div>
+        <div class="timeline-content">
+          <div style="display: flex; justify-content: space-between;">
+            <div class="place-name">
+              <span class="flag flag-greece">🇬🇷</span> Santorini, Greece
+            </div>
+          </div>
+          <div style="display: flex; align-items: center; gap: 16px; margin-top: 8px;">
+            <span class="tag">6 days</span>
+            <span class="tag">412 photos</span>
+            <span class="rating-stars">★★★★★</span>
+          </div>
+        </div>
+      </div>
+
       <!-- 2025 -->
       <div class="timeline-item">
         <div class="timeline-year">2025</div>
         <div class="timeline-content">
           <div style="display: flex; justify-content: space-between;">
             <div class="place-name">
-              <span class="flag flag-spain">🇪🇸</span> Barcelona, Spain
+              <span class="flag flag-thailand">🇹🇭</span> Bangkok, Thailand
             </div>
           </div>
           <div style="display: flex; align-items: center; gap: 16px; margin-top: 8px;">
-            <span class="tag">8 days</span>
-            <span class="tag">523 photos</span>
+            <span class="tag">7 days</span>
+            <span class="tag">456 photos</span>
             <span class="rating-stars">★★★★★</span>
           </div>
         </div>
@@ -302,6 +531,55 @@
           </div>
         </div>
       </div>
+
+      <div class="timeline-item">
+        <div class="timeline-year">2025</div>
+        <div class="timeline-content">
+          <div style="display: flex; justify-content: space-between;">
+            <div class="place-name">
+              <span class="flag flag-uk">🇬🇧</span> St Ives, Cornwall
+            </div>
+          </div>
+          <div style="display: flex; align-items: center; gap: 16px; margin-top: 8px;">
+            <span class="tag">7 days</span>
+            <span class="tag">289 photos</span>
+            <span class="rating-stars">★★★★★</span>
+          </div>
+        </div>
+      </div>
+
+      <!-- 2026 -->
+      <div class="timeline-item">
+        <div class="timeline-year">2026</div>
+        <div class="timeline-content">
+          <div style="display: flex; justify-content: space-between;">
+            <div class="place-name">
+              <span class="flag flag-france">🇫🇷</span> Chamonix, France
+            </div>
+          </div>
+          <div style="display: flex; align-items: center; gap: 16px; margin-top: 8px;">
+            <span class="tag">7 days</span>
+            <span class="tag">312 photos</span>
+            <span class="rating-stars">★★★★★</span>
+          </div>
+        </div>
+      </div>
+
+      <div class="timeline-item">
+        <div class="timeline-year">2026</div>
+        <div class="timeline-content">
+          <div style="display: flex; justify-content: space-between;">
+            <div class="place-name">
+              <span class="flag flag-sweden">🇸🇪</span> Stockholm, Sweden
+            </div>
+          </div>
+          <div style="display: flex; align-items: center; gap: 16px; margin-top: 8px;">
+            <span class="tag">5 days</span>
+            <span class="tag">234 photos</span>
+            <span class="rating-stars">★★★★☆</span>
+          </div>
+        </div>
+      </div>
     </div>
   </section>
 
@@ -310,135 +588,95 @@
     <h2>🤖 AI Recommendations</h2>
     
     <div class="card">
-      <div class="recommendation">
-        <div class="rec-destination">🏛️ Naples & the Amalfi Coast, Italy</div>
-        <p class="rec-why">Similar to your Barcelona trip but more authentic Italian charm. Perfect for Clara (10) who loves history, and Ethan's first pasta adventure!</p>
+      <div class="recommendation" style="background: linear-gradient(135deg, #2a1a3f 0%, #16213e 100%);">
+        <div class="rec-destination">🏔️ Zermatt & Interlaken, Switzerland 🇨🇭</div>
+        <p class="rec-why">Based on your love for Val Thorens and Chamonix, you'll adore the Swiss Alps! Mountaineering adventures for Anne, kid-friendly hikes for Clara & Ethan.</p>
+        <div style="display: flex; gap: 10px; margin-top: 16px;">
+          <span class="tag">Similar to: Val Thorens</span>
+          <span class="tag">Winter 2027</span>
+          <span class="tag">Budget: ££££</span>
+        </div>
+      </div>
+
+      <div class="recommendation" style="background: linear-gradient(135deg, #1a2a40 0%, #0a1f3e 100%);">
+        <div class="rec-destination">🏛️ Naples & the Amalfi Coast, Italy 🇮🇹</div>
+        <p class="rec-why">Similar to Barcelona but more authentic Italian charm. Perfect for Clara (10) who loves history, and Ethan's first pasta adventure!</p>
         <div style="display: flex; gap: 10px; margin-top: 16px;">
           <span class="tag">Similar to: Barcelona</span>
           <span class="tag">Best in June</span>
-          <span class="tag">4h from London</span>
-        </div>
-      </div>
-
-      <div class="recommendation">
-        <div class="rec-destination">🏔️ Zermatt & Verbier, Switzerland</div>
-        <p class="rec-why">Mountains for adventure seekers! You'll love the views like Val Thorens but with more après-ski culture. Zoe (7) will be thrilled!</p>
-        <div style="display: flex; gap: 10px; margin-top: 16px;">
           <span class="tag">Family-friendly</span>
-          <span class="tag"> Skiing & Hiking</span>
-          <span class="tag">Winter 2026</span>
         </div>
       </div>
 
-      <div class="recommendation">
-        <div class="rec-destination">🏖️ Zakynthos, Greece</div>
-        <div style="display: flex; align-items: center; gap: 12px;">
-          <span class="flag flag-greece">🇬🇷</span>
-        </div>
+      <div class="recommendation" style="background: linear-gradient(135deg, #0a2f2f 0%, #0a3e3e 100%);">
+        <div class="rec-destination">🏖️ Zakynthos & Crete, Greece 🇬🇷</div>
         <p class="rec-why">Beach paradise like Mallorca but less crowded. Crystal-clear waters perfect for Ethan (4) to splash in. 2.5h flight from London.</p>
         <div style="display: flex; gap: 10px; margin-top: 16px;">
           <span class="tag">Beach lover</span>
-          <span class="tag">Summer 2026</span>
-          <span class="tag"> Budget: ££</span>
+          <span class="tag">Summer 2027</span>
+          <span class="tag">Budget: £££</span>
         </div>
       </div>
 
-      <div class="recommendation">
-        <div class="rec-destination">🏰 Edinburgh & Glasgow, Scotland</div>
-        <p class="rec-why">Domestic trip with castle adventures and music culture. Perfect for a spring half-term break close to home.</p>
+      <div class="recommendation" style="background: linear-gradient(135deg, #2f0a2f 0%, #3e0a26 100%);">
+        <div class="rec-destination">🏰 Edinburgh & Glasgow, Scotland 🏴</div>
+        <p class="rec-why">Domestic trip with castle adventures, whisky tastings, and music culture. Perfect for a spring half-term break close to home.</p>
         <div style="display: flex; gap: 10px; margin-top: 16px;">
           <span class="tag">UK trip</span>
-          <span class="tag">Culture</span>
-          <span class="tag">2027</span>
-        </div>
-      </div>
-
-      <div class="recommendation">
-        <div class="rec-destination">🌊 Dingle Peninsula, Ireland</div>
-        <p class="rec-why">Hidden gem similar to Cornwall. Whales, dolphins, and ancient stone circles. Clara will love the legends.</p>
-        <div style="display: flex; gap: 10px; margin-top: 16px;">
-          <span class="tag">Nature</span>
-          <span class="tag">Coastal</span>
-          <span class="tag">May 2027</span>
+          <span class="tag">Culture & History</span>
+          <span class="tag">Spring 2027</span>
         </div>
       </div>
     </div>
   </section>
 
-  <!-- ROADTRIP PLANNER SECTION -->
+  <!-- TRIP INSIGHTS / QUOTE WALL -->
   <section class="section">
-    <h2>🚕 Road Trip Planner: Southern France</h2>
+    <h2>✨ Travel Insights from Your Photos</h2>
     
     <div class="card">
-      <div class="roadmap">
-        <div class="roadmap-item">
-          <div class="roadmap-number">Day 1</div>
-          <div class="roadmap-details">
-            <h3>抵达里昂 (Lyon)</h3>
-            <p>Arrive at Lyon Airport. Stay in a cozy Airbnb near Presqu'île.</p>
-            <div style="margin-top: 8px;">
-              <span class="tag">Drive: 2h from airport</span>
-              <span class="tag">Accommodation: €120/night</span>
-            </div>
-          </div>
+      <div class="quote-wall">
+        <div class="quote-item">
+          <p class="quote-text">"Your travels span 23 countries and over 15,000 km on average. You have a clear love for Mediterranean destinations with 78% of trips in summer!"</p>
+          <p class="quote-author">— Wanderlust AI Analysis</p>
         </div>
 
-        <div class="roadmap-item">
-          <div class="roadmap-number">Day 2-3</div>
-          <div class="roadmap-details">
-            <h3>里昂美食之旅 (Lyon Food Tour)</h3>
-            <p>Bouchons and wine tasting! Clara at Bresse farm, Zoe at cooking class.</p>
-            <div style="margin-top: 8px;">
-              <span class="tag">Activities: €45/person</span>
-              <span class="tag">Accommodation: €110/night</span>
-            </div>
-          </div>
+        <div class="quote-item">
+          <p class="quote-text">"Looking at your travel patterns, Barcelona (2022) and Bangkok (2025) show you appreciate vibrant cities with rich culture and amazing food."</p>
+          <p class="quote-author">— Travel DNA Pattern #17</p>
         </div>
 
-        <div class="roadmap-item">
-          <div class="roadmap-number">Day 4-5</div>
-          <div class="roadmap-details">
-            <h3>里昂 → 尼斯 (Lyon →Nice)</h3>
-            <p>Southern France coastal drive through Provence! Stops in Avignon.</p>
-            <div style="margin-top: 8px;">
-              <span class="tag">Drive: 4.5h</span>
-              <span class="tag">Accommodation: €130/night</span>
-            </div>
-          </div>
+        <div class="quote-item">
+          <p class="quote-text">"You're a true family traveler: 82% of your trips include family members, and you average 8.3 days per trip."</p>
+          <p class="quote-author">— Family Travel Profile</p>
         </div>
 
-        <div class="roadmap-item">
-          <div class="roadmap-number">Day 6-7</div>
-          <div class="roadmap-details">
-            <h3>尼斯海滩假期 (Nice Beach)</h3>
-            <p>Beaches, promenades, and gelato. Perfect ending to your French adventure!</p>
-            <div style="margin-top: 8px;">
-              <span class="tag">Activities: €60/person</span>
-              <span class="tag">Accommodation: €140/night</span>
-            </div>
-          </div>
+        <div class="quote-item">
+          <p class="quote-text">"From Cornwall to Chamonix, your path shows you blend coastal beauty with mountain adventures. Your next destination should be equally diverse!"</p>
+          <p class="quote-author">— Route Planner AI</p>
+        </div>
+
+        <div class="quote-item">
+          <p class="quote-text">"The average distance you travel is 15,000 km per trip — you're clearly willing to go the distance for the perfect vacation!"</p>
+          <p class="quote-author">— Wanderlust Stats 2026</p>
         </div>
       </div>
 
-      <div style="margin-top: 24px; padding: 16px; background: var(--surface); border-radius: var(--radius);">
-        <h3 style="color: var(--accent);">Trip Summary</h3>
-        <div class="grid-4" style="margin-top: 16px;">
-          <div>
-            <strong>7 days</strong><br>
-            <span style="color: var(--dim);">Southern France itinerary</span>
-          </div>
-          <div>
-            <strong>€850-1,100</strong><br>
-            <span style="color: var(--dim);">Total cost (family of 5)</span>
-          </div>
-          <div>
-            <strong>780 km</strong><br>
-            <span style="color: var(--dim);">Total driving distance</span>
-          </div>
-          <div>
-            <strong>Airport: Lyon (LYS)</strong><br>
-            <span style="color: var(--dim);">Return at Nice (NCE)</span>
-          </div>
+      <div class="grid-3" style="margin-top: 24px;">
+        <div>
+          <strong>🎯 Top Destination Match</strong><br>
+          <span style="color: var(--accent); font-size: 1.2rem;">Santorini, Greece</span><br>
+          <span style="color: var(--dim);">92% match based on your coastal preferences</span>
+        </div>
+        <div>
+          <strong>🏔️ Peak Adventure Score</strong><br>
+          <span style="color: var(--accent); font-size: 1.2rem;">Swiss Alps</span><br>
+          <span style="color: var(--dim);">87% match after Val Thorens & Chamonix</span>
+        </div>
+        <div>
+          <strong>🌊 Coastal Perfect Match</strong><br>
+          <span style="color: var(--accent); font-size: 1.2rem;">Croatia</span><br>
+          <span style="color: var(--dim);">94% similarity to your Lisbon/Cornwall trips</span>
         </div>
       </div>
     </div>
@@ -452,12 +690,40 @@
 <script src="https://unpkg.com/leaflet@1.9/dist/leaflet.js"></script>
 <script>
   // Initialize simple map
-  const map = L.map('map', { zoomControl: false }).setView([48, 6], 5);
+  const map = L.map('mapArea').setView([48, 12], 5);
   
   L.tileLayer('https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png', {
     attribution: '&copy; OpenStreetMap &copy; CARTO',
     maxZoom: 19,
   }).addTo(map);
+  
+  // Add pins manually
+  const pinLocations = [
+    { lat: 48.8566, lng: 2.3522, title: "Paris, France" },
+    { lat: 41.3851, lng: 2.1734, title: "Barcelona, Spain" },
+    { lat: 38.7223, lng: -9.1393, title: "Lisbon, Portugal" },
+    { lat: 41.9028, lng: 12.4964, title: "Rome, Italy" },
+    { lat: 51.5074, lng: -0.1278, title: "London, UK" },
+    { lat: 52.3676, lng: 4.9041, title: "Amsterdam, Netherlands" },
+    { lat: 64.1466, lng: -21.9426, title: "Reykjavík, Iceland" },
+    { lat: 37.9792, lng: 23.7166, title: "Athens, Greece" },
+    { lat: 13.7563, lng: 100.5018, title: "Bangkok, Thailand" },
+    { lat: 31.6294, lng: -7.9809, title: "Marrakesh, Morocco" },
+    { lat: 55.9533, lng: -3.1883, title: "Edinburgh, Scotland" },
+    { lat: 54.3482, lng: -2.7616, title: "Lake District, UK" },
+    { lat: 50.2140, lng: -5.4803, title: "Cornwall, UK" },
+    { lat: 42.6507, lng: 18.0944, title: "Dubrovnik, Croatia" }
+  ];
+  
+  pinLocations.forEach(pin => {
+    L.circleMarker([pin.lat, pin.lng], {
+      color: '#00cc88',
+      fillColor: '#00cc88',
+      fillOpacity: 0.7,
+      radius: 10
+    }).bindTooltip(pin.title, { permanent: false, direction: 'top' })
+      .addTo(map);
+  });
 </script>
 </body>
 </html>
