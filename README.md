@@ -9,13 +9,13 @@
 
 **Wanderlust scans your Apple Photos library to discover your travel history, then uses AI to recommend your next perfect holiday — based on where you've actually been, who you travel with, and what patterns emerge from your real life.**
 
-[View Demo Screenshot](docs/screenshots/demo.html) *(14MB)*
+[View Demo Screenshots](docs/screenshots/README.md)
 
 ---
 
 ## ✨ What It Looks Like
 
-![Wanderlust UI Preview](docs/screenshots/demo.html)
+<img src="docs/screenshots/linkedin-hero.png" alt="Wanderlust UI Preview" width="1400"/>
 
 See your trips on an interactive map, explore your travel timeline, get AI-powered recommendations, and plan road trips with our comprehensive web interface.
 
