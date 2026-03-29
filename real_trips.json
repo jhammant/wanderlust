@@ -1,0 +1,342 @@
+{
+  "trips": [
+    {
+      "city": "Chiyoda",
+      "country": "Japan",
+      "start": "Jan 2014",
+      "days": 18,
+      "photos": 1636,
+      "lat": 35.69202686684331,
+      "lng": 139.7377945127977,
+      "season": "winter",
+      "family": false
+    },
+    {
+      "city": "Borrowdale",
+      "country": "United Kingdom",
+      "start": "Jul 2022",
+      "days": 10,
+      "photos": 1072,
+      "lat": 54.508307086570476,
+      "lng": -3.0955174110247876,
+      "season": "summer",
+      "family": false
+    },
+    {
+      "city": "Chessy",
+      "country": "France",
+      "start": "Jul 2020",
+      "days": 15,
+      "photos": 805,
+      "lat": 48.871659304539875,
+      "lng": 2.779319386564417,
+      "season": "summer",
+      "family": false
+    },
+    {
+      "city": "es Mercadal",
+      "country": "Spain",
+      "start": "Aug 2022",
+      "days": 10,
+      "photos": 786,
+      "lat": 40.04434266212121,
+      "lng": 4.1093849390909085,
+      "season": "summer",
+      "family": false
+    },
+    {
+      "city": "Lisse",
+      "country": "Netherlands",
+      "start": "Apr 2024",
+      "days": 11,
+      "photos": 691,
+      "lat": 52.27013187106601,
+      "lng": 4.546781770896786,
+      "season": "spring",
+      "family": false
+    },
+    {
+      "city": "Dubai",
+      "country": "United Arab Emirates",
+      "start": "Jan 2015",
+      "days": 14,
+      "photos": 643,
+      "lat": 25.17541587137765,
+      "lng": 55.23858579578998,
+      "season": "winter",
+      "family": false
+    },
+    {
+      "city": "Jeffreyston",
+      "country": "United Kingdom",
+      "start": "Jul 2021",
+      "days": 15,
+      "photos": 630,
+      "lat": 51.734312796045195,
+      "lng": -4.75701756141243,
+      "season": "summer",
+      "family": false
+    },
+    {
+      "city": "Skelwith Bridge",
+      "country": "United Kingdom",
+      "start": "Aug 2023",
+      "days": 21,
+      "photos": 606,
+      "lat": 54.42971163599182,
+      "lng": -3.027444464928425,
+      "season": "summer",
+      "family": false
+    },
+    {
+      "city": "Adeje",
+      "country": "Spain",
+      "start": "Jul 2019",
+      "days": 11,
+      "photos": 584,
+      "lat": 28.101616310122502,
+      "lng": -16.753601057382337,
+      "season": "summer",
+      "family": false
+    },
+    {
+      "city": "Torre Annunziata",
+      "country": "Italy",
+      "start": "Jun 2015",
+      "days": 13,
+      "photos": 495,
+      "lat": 40.72318627612761,
+      "lng": 14.43163378437844,
+      "season": "summer",
+      "family": false
+    },
+    {
+      "city": "Serik",
+      "country": "Turkey",
+      "start": "Aug 2024",
+      "days": 11,
+      "photos": 489,
+      "lat": 36.842919361111115,
+      "lng": 31.11978437453704,
+      "season": "summer",
+      "family": false
+    },
+    {
+      "city": "Triberg (Kernstadt)",
+      "country": "Germany",
+      "start": "Apr 2025",
+      "days": 10,
+      "photos": 480,
+      "lat": 48.12856312666666,
+      "lng": 8.22987536,
+      "season": "spring",
+      "family": false
+    },
+    {
+      "city": "Portim\u00e3o",
+      "country": "Portugal",
+      "start": "May 2023",
+      "days": 8,
+      "photos": 472,
+      "lat": 37.12429054847757,
+      "lng": -8.578560392628205,
+      "season": "spring",
+      "family": false
+    },
+    {
+      "city": "Middelkerke",
+      "country": "Belgium",
+      "start": "Sep 2022",
+      "days": 10,
+      "photos": 437,
+      "lat": 51.15594139002556,
+      "lng": 2.8282275426136363,
+      "season": "autumn",
+      "family": false
+    },
+    {
+      "city": "Agios Nikolaos Municipal Unit",
+      "country": "Greece",
+      "start": "Aug 2025",
+      "days": 13,
+      "photos": 374,
+      "lat": 35.23422365625,
+      "lng": 25.720540052083333,
+      "season": "summer",
+      "family": false
+    },
+    {
+      "city": "Berlin",
+      "country": "Germany",
+      "start": "Feb 2015",
+      "days": 3,
+      "photos": 371,
+      "lat": 52.513241585705295,
+      "lng": 13.40689824328841,
+      "season": "winter",
+      "family": false
+    },
+    {
+      "city": "Son Moro",
+      "country": "Spain",
+      "start": "Sep 2017",
+      "days": 8,
+      "photos": 320,
+      "lat": 39.59799689674523,
+      "lng": 3.3793590628507295,
+      "season": "autumn",
+      "family": false
+    },
+    {
+      "city": "East Suffolk",
+      "country": "United Kingdom",
+      "start": "Jan 2022",
+      "days": 3,
+      "photos": 316,
+      "lat": 52.18627182401316,
+      "lng": 1.6160192379385965,
+      "season": "winter",
+      "family": false
+    },
+    {
+      "city": "Coniston",
+      "country": "United Kingdom",
+      "start": "Aug 2018",
+      "days": 9,
+      "photos": 312,
+      "lat": 54.353030363565885,
+      "lng": -3.052032902635659,
+      "season": "summer",
+      "family": false
+    },
+    {
+      "city": "Bath",
+      "country": "United Kingdom",
+      "start": "Sep 2012",
+      "days": 2,
+      "photos": 305,
+      "lat": 51.384015738076506,
+      "lng": -2.3627226230710385,
+      "season": "autumn",
+      "family": false
+    },
+    {
+      "city": "Lidlington",
+      "country": "United Kingdom",
+      "start": "Jan 2018",
+      "days": 4,
+      "photos": 303,
+      "lat": 52.02664978987898,
+      "lng": -0.5334455555555556,
+      "season": "winter",
+      "family": false
+    },
+    {
+      "city": "Somerset",
+      "country": "United Kingdom",
+      "start": "Jun 2025",
+      "days": 8,
+      "photos": 292,
+      "lat": 51.15192958362169,
+      "lng": -2.588276124567474,
+      "season": "summer",
+      "family": false
+    },
+    {
+      "city": "Sal",
+      "country": "Cape Verde",
+      "start": "Feb 2019",
+      "days": 8,
+      "photos": 286,
+      "lat": 16.643449385964914,
+      "lng": -22.92536800125313,
+      "season": "winter",
+      "family": false
+    },
+    {
+      "city": "Westmorland and Furness",
+      "country": "United Kingdom",
+      "start": "Aug 2020",
+      "days": 6,
+      "photos": 284,
+      "lat": 54.47803397727723,
+      "lng": -2.9489225070297027,
+      "season": "summer",
+      "family": false
+    },
+    {
+      "city": "Somerset",
+      "country": "United Kingdom",
+      "start": "Jun 2022",
+      "days": 4,
+      "photos": 277,
+      "lat": 51.14982100661853,
+      "lng": -2.585722773766546,
+      "season": "summer",
+      "family": false
+    },
+    {
+      "city": "Somerset",
+      "country": "United Kingdom",
+      "start": "Jun 2023",
+      "days": 4,
+      "photos": 276,
+      "lat": 51.15154254830918,
+      "lng": -2.5861810809178745,
+      "season": "summer",
+      "family": false
+    },
+    {
+      "city": "East Cambridgeshire",
+      "country": "United Kingdom",
+      "start": "Jul 2023",
+      "days": 3,
+      "photos": 257,
+      "lat": 52.475036861219195,
+      "lng": 0.3111043579766537,
+      "season": "summer",
+      "family": false
+    },
+    {
+      "city": "Liverpool",
+      "country": "United Kingdom",
+      "start": "Mar 2015",
+      "days": 2,
+      "photos": 247,
+      "lat": 53.40333483159244,
+      "lng": -2.981596457462888,
+      "season": "spring",
+      "family": false
+    },
+    {
+      "city": "Arborfield",
+      "country": "United Kingdom",
+      "start": "Apr 2022",
+      "days": 5,
+      "photos": 232,
+      "lat": 51.39583509339081,
+      "lng": -0.9212574183908045,
+      "season": "spring",
+      "family": false
+    },
+    {
+      "city": "Somerset",
+      "country": "United Kingdom",
+      "start": "Jun 2024",
+      "days": 6,
+      "photos": 227,
+      "lat": 51.15139802022655,
+      "lng": -2.587546941747573,
+      "season": "summer",
+      "family": false
+    }
+  ],
+  "total_trips": 269,
+  "total_photos": 24715,
+  "countries": 30,
+  "profile": {
+    "favorite_season": "summer",
+    "avg_duration": 8,
+    "travel_style": "mixed"
+  }
+}
