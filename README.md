@@ -104,24 +104,24 @@ pip install -e .[dev]
 
 ```mermaid
 graph TB
-    subgraph Data[Input Data]
-        A[Photos.sqlite<br/>Apple Photos database]
+    subgraph Input
+        A[Photos.sqlite]
     end
     
     subgraph Processing
-        B Scanner[Scanner]
-        C Clusterer[Trip Clusterer<br/>DBSCAN + time windows]
-        D Profiler[Travel Profile<br/>Extract patterns]
+        B[Scanner]
+        C[Trip Clusterer]
+        D[Travel Profiler]
     end
     
     subgraph AI
-        E GeoCoder[Reverse Geocoding<br/>Nominatim]
-        F Recommender[AI Recommendation<br/>OpenRouter/Ollama]
+        E[Geocoder]
+        F[AI Recommender]
     end
     
     subgraph Output
-        G CLI[Command Line Interface]
-        H Web[Web UI<br/>Flask + Leaflet.js]
+        G[CLI]
+        H[Web UI]
     end
     
     A --> B
