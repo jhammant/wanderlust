@@ -29,7 +29,8 @@ See your trips on an interactive map, explore your travel timeline, get AI-power
 
 ```bash
 # Install Wanderlust
-pip install wanderlust
+git clone https://github.com/jhammant/wanderlust
+cd wanderlust && pip install -e .
 
 # Scan your photo library (read-only, nothing leaves your machine)
 wanderlust scan
@@ -56,7 +57,7 @@ Wanderlust was born from this question. It reads your photo metadata (GPS, dates
 
 The result? AI recommendations that go beyond generic tourism brochures:
 
-> *"You loved Barcelona with the kids — try Naples for authentic Italian charm and easier history for Clara (10). For Ethan's first pasta, a week in the Amalfi Coast would be perfect."*
+> *"You loved Barcelona with the kids — try Naples for authentic Italian charm and easier history for the kids. For the little one's first pasta, a week in the Amalfi Coast would be perfect."*
 
 **100% local**, privacy-first, and rooted in your actual travel history — not just AI imagination.
 
@@ -148,7 +149,7 @@ graph TB
 
 ```bash
 # Scan and discover trips
-wanderlust scan --family "Anne" --name-map "Clara=Klara"
+wanderlust scan --family "Family" --name-map "Clara=Klara"
 
 # See trip statistics
 wanderlust stats
