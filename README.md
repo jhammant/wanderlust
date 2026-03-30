@@ -149,7 +149,7 @@ graph TB
 
 ```bash
 # Scan and discover trips
-wanderlust scan --family "Family" --name-map "Clara=Klara"
+wanderlust scan --family "Family" --name-map "Child1=Nickname"
 
 # See trip statistics
 wanderlust stats
