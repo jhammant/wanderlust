@@ -77,7 +77,7 @@ All screenshots are ready for direct use in LinkedIn posts!
 ## 🎨 Screencap Instructions (1400x900)
 
 ```bash
-cd /Users/jhammant/dev/wanderlust
+cd /Users/jhammant/dev/oss/wanderlust
 
 # Start web server with real trips data
 python3 -m wanderlust.cli web --trips-file trips.json

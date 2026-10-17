@@ -4,7 +4,7 @@ import asyncio
 from pathlib import Path
 from playwright.async_api import async_playwright
 
-OUTPUT_DIR = Path("/Users/jhammant/dev/wanderlust/docs/screenshots")
+OUTPUT_DIR = Path("/Users/jhammant/dev/oss/wanderlust/docs/screenshots")
 OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 BASE_URL = "http://127.0.0.1:5555"
 
